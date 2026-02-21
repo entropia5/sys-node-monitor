@@ -1,6 +1,6 @@
  
 
-Telegram System Monitor RPi-4 
+Telegram System Monitor Bot
 
 Легковесный мониторинг системных ресурсов для Raspberry Pi 4 (и других Linux-серверов) на C++, работающий через Telegram Bot API.
 

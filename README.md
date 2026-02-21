@@ -24,30 +24,43 @@ High-performance system monitoring bot for RPi4/Linux, written in C++17.
 
 Запуск.
 
-1.Установка зависимостей:
+1.1 Установка зависимостей:
 
 sudo apt-get update
 sudo apt-get install libcurl4-openssl-dev nlohmann-json3-dev g++
 
+1.2 Регистрация бота в @BotFather:
+- вводим в поиске телеграм @BotFather
+- /newbot
+- Name: Вводим имя бота (например, My RPi Monitor).
+- Username: Вводим уникальный адрес бота, оканчивающийся на bot (например, sys_node_monitor_bot)
+- Token: После этого BotFather отобразит длинную строку (наш токен, который нужен для дальнейшей настройки).
+- в поиске также ищем бота @userinfobot(наш id, который также нужен для дальнейшей настройки)
+- Находим. Запускаем (Start) и он пришлет id. Это наш CHAT_ID.
 
-2.Компиляция:
+2.1 Открываем наш исходник SMB.cpp
+2.2 Компиляция:
 используем флаг -std=c++17 и линковку curl и pthread:
 g++ -std=c++17 SMB.cpp -o system_monitor_bot -lcurl -lpthread
 
 3.Настройка окружения (.env):
-Проект не хранит токены в коде. Для разового запуска используйте export:
+Проект не хранит токены в коде. Для разового запуска(проверки) в терминале сервера:
+/*
 
 export BOT_TOKEN="ваш_токен"
 export CHAT_ID="ваш_id"
 ./system_monitor_bot
 
+*/
+
 
 4.Автозапуск (Systemd):
 
-1. Создаем и редактируем на сервере RPi system_monitor.service
+- Создаем и редактируем на сервере RPi system_monitor.service
  (sudo nano /etc/systemd/system/system_monitor_bot.service)
+/*
 
-2. [Unit]
+[Unit]
 Description=Telegram System Monitor Bot
 After=network.target
 
@@ -74,6 +87,6 @@ sudo systemctl enable system_monitor_bot.service
 sudo systemctl start system_monitor_bot.service
 
 
-
+*/
 
  

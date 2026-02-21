@@ -54,11 +54,13 @@ After=network.target
 [Service]
 Type=simple
 User=root
-# Укажите путь к папке с бинарником
+
+// Укажите путь к папке с бинарником
 WorkingDirectory=/path/to/your/folder 
-# Переменные окружения прямо в сервисе
-Environment="BOT_TOKEN=7814990358:AAFh..."
-Environment="CHAT_ID=7407939545"
+
+// Переменные окружения прямо в сервисе
+Environment="BOT_TOKEN=44444:AAFh..."
+Environment="CHAT_ID= 4444444444"
 ExecStart=/path/to/your/folder/system_monitor_bot
 Restart=always
 RestartSec=10

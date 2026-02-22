@@ -110,26 +110,25 @@ units.push_back(svc);
 std::sort(units.begin(), units.end());
 
 std::ostringstream oss;
-oss << "systemd bot report:\n";
-oss << "\n";
-oss << std::left << std::setw(24) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n";
-oss << "\n";
+oss << "systemd bot report:\n\n";
+oss << std::left << std::setw(30) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n\n";
 
 for (const auto& name : units) {
 std::string displayName = name;
+if (displayName.substr(0, 4) == "bot-") displayName = displayName.substr(4);
 if (displayName.length() > 8 && displayName.substr(displayName.length() - 8) == ".service") {
 displayName = displayName.substr(0, displayName.length() - 8);
 }
 
-std::string shortName = (displayName.length() > 23 ? displayName.substr(0, 22) + "~" : displayName);
-oss << std::left << std::setw(24) << shortName;
+std::string shortName = (displayName.length() > 29 ? displayName.substr(0, 28) + "~" : displayName);
+oss << std::left << std::setw(30) << shortName;
 
 std::string active = exec(("systemctl is-active " + name).c_str());
 if (active == "active") {
 std::string memStr = exec(("systemctl show " + name + " -p MemoryCurrent --value").c_str());
 
 if (memStr == "0" || memStr == "[not set]" || memStr.empty()) {
-std::string psCmd = "ps -C " + displayName + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
+std::string psCmd = "ps -C " + name + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
 memStr = exec(psCmd.c_str());
 }
 
@@ -146,8 +145,7 @@ oss << (active == "failed" ? "[FAIL]" : "[OFF ]") << "  \n";
 }
 }
 
-oss << "\n";
-oss << "Всего запущено ботов: " << units.size() << "\n";
+oss << "\nВсего в строю: " << units.size() << "\n";
 return "```\n" + escape(oss.str()) + "\n```";
 }
 

@@ -111,7 +111,7 @@ std::sort(units.begin(), units.end());
 
 std::ostringstream oss;
 oss << "systemd bot report:\n\n";
-oss << std::left << std::setw(30) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n\n";
+oss << std::left << std::setw(25) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n\n";
 
 for (const auto& name : units) {
 std::string displayName = name;
@@ -120,23 +120,28 @@ if (displayName.length() > 8 && displayName.substr(displayName.length() - 8) == 
 displayName = displayName.substr(0, displayName.length() - 8);
 }
 
-std::string shortName = (displayName.length() > 29 ? displayName.substr(0, 28) + "~" : displayName);
-oss << std::left << std::setw(30) << shortName;
+std::string shortName = (displayName.length() > 24 ? displayName.substr(0, 23) + "~" : displayName);
+oss << std::left << std::setw(25) << shortName;
 
 std::string active = exec(("systemctl is-active " + name).c_str());
 if (active == "active") {
 std::string memStr = exec(("systemctl show " + name + " -p MemoryCurrent --value").c_str());
 
 if (memStr == "0" || memStr == "[not set]" || memStr.empty()) {
-std::string psCmd = "ps -C " + name + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
+std::string fullSvcName = name;
+if (fullSvcName.length() > 8 && fullSvcName.substr(fullSvcName.length() - 8) == ".service") {
+    fullSvcName = fullSvcName.substr(0, fullSvcName.length() - 8);
+}
+std::string psCmd = "ps -C " + fullSvcName + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
 memStr = exec(psCmd.c_str());
 }
 
-oss << "[ OK ]  ";
+oss << "[OK]    ";
 try {
 if (!memStr.empty() && memStr != "0") {
 long long val = std::stoll(memStr);
 double mb = (val > 2000000) ? (val / 1024.0 / 1024.0) : (val / 1024.0);
+if (mb < 0.1) mb = 0.1;
 oss << std::fixed << std::setprecision(1) << mb << "M\n";
 } else oss << "0.1M\n";
 } catch(...) { oss << "N/A\n"; }

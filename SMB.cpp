@@ -98,58 +98,57 @@ std::string getTelemetry() {
 }
 
 std::string getBotsTop() {
-    
-    std::string cmd = "systemctl list-units --type=service --all --no-legend | awk '$1 ~ /^bot-/ {print $1}'";
-    std::string raw = exec(cmd.c_str());
-    
-    std::vector<std::string> units;
-    std::istringstream iss(raw);
-    std::string svc;
-    
-    while (std::getline(iss, svc) && !svc.empty()) {
-        units.push_back(svc);
-    }
+std::string cmd = "systemctl list-units --type=service --all --no-legend | awk '$1 ~ /^bot-/ {print $1}'";
+std::string raw = exec(cmd.c_str());
+std::vector<std::string> units;
+std::istringstream iss(raw);
+std::string svc;
+while (std::getline(iss, svc) && !svc.empty()) {
+units.push_back(svc);
+}
 
-    
-    std::sort(units.begin(), units.end());
+std::sort(units.begin(), units.end());
 
-    std::ostringstream oss;
-    oss << "systemd bot report:\n";
-    oss << "\n";
-    oss << std::left << std::setw(18) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n";
-    oss << "\n";
+std::ostringstream oss;
+oss << "systemd bot report:\n";
+oss << "\n";
+oss << std::left << std::setw(24) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n";
+oss << "\n";
 
-    for (const auto& name : units) {
-      
-        std::string displayName = name;
-        if (displayName.substr(0, 4) == "bot-") displayName = displayName.substr(4);
-        if (displayName.length() > 8 && displayName.substr(displayName.length() - 8) == ".service") {
-            displayName = displayName.substr(0, displayName.length() - 8);
-        }
+for (const auto& name : units) {
+std::string displayName = name;
+if (displayName.length() > 8 && displayName.substr(displayName.length() - 8) == ".service") {
+displayName = displayName.substr(0, displayName.length() - 8);
+}
 
-        std::string shortName = (displayName.length() > 17 ? displayName.substr(0, 16) + "~" : displayName);
-        oss << std::left << std::setw(18) << shortName;
+std::string shortName = (displayName.length() > 23 ? displayName.substr(0, 22) + "~" : displayName);
+oss << std::left << std::setw(24) << shortName;
 
-        std::string active = exec(("systemctl is-active " + name).c_str());
-        
-        if (active == "active") {
-            std::string memStr = exec(("systemctl show " + name + " -p MemoryCurrent --value").c_str());
-            oss << "[ OK ]  ";
-            try {
-                if (!memStr.empty() && memStr != "0" && memStr != "[not set]") {
-                    long long bytes = std::stoll(memStr);
-                    oss << std::fixed << std::setprecision(1) << (bytes / 1024.0 / 1024.0) << "M\n";
-                } else oss << "0.0M\n";
-            } catch(...) { oss << "N/A\n"; }
-        } else {
-            oss << (active == "failed" ? "[FAIL]" : "[OFF ]") << "  \n";
-        }
-    }
+std::string active = exec(("systemctl is-active " + name).c_str());
+if (active == "active") {
+std::string memStr = exec(("systemctl show " + name + " -p MemoryCurrent --value").c_str());
 
-    oss << "\n";
-    oss << "Всего запущено ботов: " << units.size() << "\n";
-    
-    return "```\n" + escape(oss.str()) + "\n```";
+if (memStr == "0" || memStr == "[not set]" || memStr.empty()) {
+std::string psCmd = "ps -C " + displayName + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
+memStr = exec(psCmd.c_str());
+}
+
+oss << "[ OK ]  ";
+try {
+if (!memStr.empty() && memStr != "0") {
+long long val = std::stoll(memStr);
+double mb = (val > 2000000) ? (val / 1024.0 / 1024.0) : (val / 1024.0);
+oss << std::fixed << std::setprecision(1) << mb << "M\n";
+} else oss << "0.1M\n";
+} catch(...) { oss << "N/A\n"; }
+} else {
+oss << (active == "failed" ? "[FAIL]" : "[OFF ]") << "  \n";
+}
+}
+
+oss << "\n";
+oss << "Всего запущено ботов: " << units.size() << "\n";
+return "```\n" + escape(oss.str()) + "\n```";
 }
 
 void callApi(const std::string& method, const std::string& params, const std::string& token) {

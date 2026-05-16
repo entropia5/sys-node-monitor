@@ -60,13 +60,13 @@ std::string getTelemetry() {
     sysinfo(&mem);
     float ramP = 100.0f * (mem.totalram - mem.freeram) / mem.totalram;
     float swapP = mem.totalswap ? 100.0f * (mem.totalswap - mem.freeswap) / mem.totalswap : 0;
-    
+
     std::ifstream tFile("/sys/class/thermal/thermal_zone0/temp");
     float temp = 0;
     if (tFile >> temp) temp /= 1000;
-    
+
     double load[3]; getloadavg(load, 3);
-    
+
     std::string cpuFreq = exec("vcgencmd measure_clock arm | cut -d= -f2");
     if(cpuFreq.empty()) cpuFreq = "N/A";
     else {
@@ -75,9 +75,9 @@ std::string getTelemetry() {
             cpuFreq = std::to_string(hz / 1000000) + " MHz";
         } catch(...) {}
     }
-    
+
     std::string localIP = exec("hostname -I | awk '{print $1}'");
-  
+
     std::string dynamicStatus = "OPERATIONAL";
     if (temp > 75.0) dynamicStatus = "OVERHEATING";
     else if (load[0] > 3.5) dynamicStatus = "HEAVY LOAD";
@@ -169,15 +169,15 @@ int main() {
     const char* tokenEnv = std::getenv("BOT_TOKEN");
     const char* chatIdEnv = std::getenv("CHAT_ID");
     if (!tokenEnv || !chatIdEnv) return 1;
-    
+
     std::string TOKEN(tokenEnv);
     std::string CHAT_ID(chatIdEnv);
-    
+
     std::string keyboard = "&reply_markup={\"inline_keyboard\":[[{\"text\":\"REFRESH\",\"callback_data\":\"ref\"},{\"text\":\"SERVICES\",\"callback_data\":\"proc\"}]]}";
-    
+
     callApi("getUpdates", "offset=-1", TOKEN);
     callApi("sendMessage", "chat_id=" + CHAT_ID + "&parse_mode=MarkdownV2&text=" + getTelemetry() + keyboard, TOKEN);
-    
+
     int lastUpdateId = 0;
     while (true) {
         CURL* curl = curl_easy_init();
@@ -191,27 +191,27 @@ int main() {
             curl_easy_perform(curl);
             curl_easy_cleanup(curl);
         }
-        
+
         if (response.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-        
+
         try {
             json j = json::parse(response);
             if (j.contains("result") && j["result"].is_array()) {
                 for (auto& update : j["result"]) {
                     lastUpdateId = update["update_id"].get<int>();
                     if (!update.contains("callback_query")) continue;
-                    
+
                     auto& cb = update["callback_query"];
                     std::string data = cb.value("data", "");
                     std::string cbId = cb.value("id", "");
-                    
+
                     if (cb.contains("message")) {
                         int msgId = cb["message"].value("message_id", 0);
                         std::string text = (data == "proc") ? getBotsTop() : getTelemetry();
-                        
+
                         callApi("answerCallbackQuery", "callback_query_id=" + cbId, TOKEN);
                         callApi("editMessageText", "chat_id=" + CHAT_ID + "&message_id=" + std::to_string(msgId) + "&parse_mode=MarkdownV2&text=" + text + keyboard, TOKEN);
                     }

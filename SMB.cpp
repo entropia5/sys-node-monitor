@@ -36,6 +36,7 @@ struct Config {
     int alertIntervalSec = 300;
     int autoRefreshSec = 0;
     bool allowServiceControl = false;
+    bool allowPowerControl = false;
 };
 
 struct ApiResponse {
@@ -147,6 +148,7 @@ Config loadConfig() {
     cfg.alertIntervalSec = envInt("ALERT_INTERVAL_SEC", cfg.alertIntervalSec);
     cfg.autoRefreshSec = envInt("AUTO_REFRESH_SEC", cfg.autoRefreshSec);
     cfg.allowServiceControl = envBool("BOT_ALLOW_SERVICE_CONTROL");
+    cfg.allowPowerControl = envBool("BOT_ALLOW_POWER_CONTROL");
     return cfg;
 }
 
@@ -288,24 +290,32 @@ ApiResponse getUpdates(int offset, const Config& cfg) {
     return result;
 }
 
-std::string mainKeyboardJson() {
-    json keyboard = {
-        {"inline_keyboard", {
-            {
-                {{"text", "Обновить"}, {"callback_data", "status"}},
-                {{"text", "SERVICES"}, {"callback_data", "services"}}
-            },
-            {
-                {{"text", "DISK"}, {"callback_data", "disk"}},
-                {{"text", "NET"}, {"callback_data", "net"}}
-            }
-        }}
-    };
+std::string mainKeyboardJson(const Config& cfg) {
+    json rows = json::array({
+        json::array({
+            {{"text", "Обновить"}, {"callback_data", "status"}},
+            {{"text", "SERVICES"}, {"callback_data", "services"}}
+        }),
+        json::array({
+            {{"text", "DISK"}, {"callback_data", "disk"}},
+            {{"text", "NET"}, {"callback_data", "net"}}
+        })
+    });
+
+    if (cfg.allowPowerControl) {
+        rows.push_back(json::array({
+            {{"text", "POWER"}, {"callback_data", "power"}}
+        }));
+    }
+
+    json keyboard = {{"inline_keyboard", rows}};
     return keyboard.dump();
 }
 
 std::string servicesKeyboardJson(std::size_t page);
 std::string keyboardForView(const std::string& view, const Config& cfg);
+std::string powerKeyboardJson();
+std::string powerConfirmKeyboardJson(const std::string& action);
 std::vector<DiskInfo> collectDisks();
 std::vector<std::string> failedBotUnits();
 
@@ -643,11 +653,46 @@ std::string servicesKeyboardJson(std::size_t page) {
     return keyboard.dump();
 }
 
+std::string powerKeyboardJson() {
+    json keyboard = {
+        {"inline_keyboard", {
+            {
+                {{"text", "Перезагрузка"}, {"callback_data", "power:ask:reboot"}},
+                {{"text", "Выключение"}, {"callback_data", "power:ask:poweroff"}}
+            },
+            {
+                {{"text", "STATUS"}, {"callback_data", "status"}},
+                {{"text", "SERVICES"}, {"callback_data", "services"}}
+            },
+            {
+                {{"text", "DISK"}, {"callback_data", "disk"}},
+                {{"text", "NET"}, {"callback_data", "net"}}
+            }
+        }}
+    };
+    return keyboard.dump();
+}
+
+std::string powerConfirmKeyboardJson(const std::string& action) {
+    json keyboard = {
+        {"inline_keyboard", {
+            {
+                {{"text", "Да, выполнить"}, {"callback_data", "power:confirm:" + action}},
+                {{"text", "Отмена"}, {"callback_data", "power"}}
+            }
+        }}
+    };
+    return keyboard.dump();
+}
+
 std::string keyboardForView(const std::string& view, const Config& cfg) {
     if ((view == "services" || view.rfind("services:", 0) == 0) && cfg.allowServiceControl) {
         return servicesKeyboardJson(servicesPageFromView(view));
     }
-    return mainKeyboardJson();
+    if (view == "power" && cfg.allowPowerControl) return powerKeyboardJson();
+    if (view == "power:ask:reboot" && cfg.allowPowerControl) return powerConfirmKeyboardJson("reboot");
+    if (view == "power:ask:poweroff" && cfg.allowPowerControl) return powerConfirmKeyboardJson("poweroff");
+    return mainKeyboardJson(cfg);
 }
 
 std::string restartUnit(const std::string& unit, const Config& cfg) {
@@ -666,6 +711,50 @@ std::string restartUnit(const std::string& unit, const Config& cfg) {
 
     std::string result = exec(("sudo -n systemctl restart " + unit + " 2>&1 && echo OK || echo FAIL").c_str());
     return codeBlock("Restart " + unit + "\n" + result);
+}
+
+std::string powerActionName(const std::string& action) {
+    if (action == "reboot") return "reboot";
+    if (action == "poweroff") return "poweroff";
+    return "";
+}
+
+std::string formatPowerMenu(const Config& cfg) {
+    if (!cfg.allowPowerControl) {
+        return codeBlock("Power control is disabled. Set BOT_ALLOW_POWER_CONTROL=1 to enable it.");
+    }
+
+    std::ostringstream oss;
+    oss << "Power control\n\n";
+    oss << "Choose action for this server.\n";
+    oss << "A confirmation step will be shown before execution.";
+    return codeBlock(oss.str());
+}
+
+std::string formatPowerConfirm(const std::string& action, const Config& cfg) {
+    if (!cfg.allowPowerControl) {
+        return codeBlock("Power control is disabled. Set BOT_ALLOW_POWER_CONTROL=1 to enable it.");
+    }
+
+    std::string command = powerActionName(action);
+    if (command.empty()) return codeBlock("Unknown power action.");
+
+    std::ostringstream oss;
+    oss << "Confirm " << command << "\n\n";
+    oss << "This will run: sudo -n systemctl " << command;
+    return codeBlock(oss.str());
+}
+
+std::string runPowerAction(const std::string& action, const Config& cfg) {
+    if (!cfg.allowPowerControl) {
+        return codeBlock("Power control is disabled. Set BOT_ALLOW_POWER_CONTROL=1 to enable it.");
+    }
+
+    std::string command = powerActionName(action);
+    if (command.empty()) return codeBlock("Unknown power action.");
+
+    std::string result = exec(("sudo -n systemctl " + command + " 2>&1 && echo OK || echo FAIL").c_str());
+    return codeBlock("Power " + command + "\n" + result);
 }
 
 std::vector<std::string> failedBotUnits() {
@@ -712,7 +801,7 @@ void sendMessage(const Config& cfg, const std::string& text) {
         {"chat_id", cfg.chatId},
         {"parse_mode", "MarkdownV2"},
         {"text", text},
-        {"reply_markup", mainKeyboardJson()}
+        {"reply_markup", mainKeyboardJson(cfg)}
     }, cfg);
 }
 
@@ -721,7 +810,7 @@ int sendDashboard(const Config& cfg) {
         {"chat_id", cfg.chatId},
         {"parse_mode", "MarkdownV2"},
         {"text", formatTelemetry(cfg)},
-        {"reply_markup", mainKeyboardJson()}
+        {"reply_markup", mainKeyboardJson(cfg)}
     }, cfg);
 
     try {
@@ -747,6 +836,11 @@ std::string reportForCallback(const std::string& data, const Config& cfg) {
     if (data == "services" || data.rfind("services:", 0) == 0) return formatServicesReport();
     if (data == "disk") return formatDiskReport();
     if (data == "net") return formatNetReport();
+    if (data == "power") return formatPowerMenu(cfg);
+    if (data == "power:ask:reboot") return formatPowerConfirm("reboot", cfg);
+    if (data == "power:ask:poweroff") return formatPowerConfirm("poweroff", cfg);
+    if (data == "power:confirm:reboot") return runPowerAction("reboot", cfg);
+    if (data == "power:confirm:poweroff") return runPowerAction("poweroff", cfg);
 
     const std::string restartPrefix = "restart:";
     if (data.rfind(restartPrefix, 0) == 0) {
@@ -762,6 +856,10 @@ std::string reportForCallback(const std::string& data, const Config& cfg) {
 
 std::string viewForCallback(const std::string& data) {
     if (data == "services" || data.rfind("services:", 0) == 0) return data;
+    if (data == "power") return "power";
+    if (data == "power:ask:reboot") return "power:ask:reboot";
+    if (data == "power:ask:poweroff") return "power:ask:poweroff";
+    if (data.rfind("power:confirm:", 0) == 0) return "status";
     if (data.rfind("restart:", 0) == 0) {
         std::string payload = data.substr(8);
         std::size_t delimiter = payload.find(':');
@@ -775,7 +873,8 @@ std::string viewForCallback(const std::string& data) {
 
 std::string keyboardForTextCommand(const std::string& text, const Config& cfg) {
     if (text == "/services") return keyboardForView("services", cfg);
-    return mainKeyboardJson();
+    if (text == "/power") return keyboardForView("power", cfg);
+    return mainKeyboardJson(cfg);
 }
 
 std::string handleTextCommand(const std::string& text, const Config& cfg) {
@@ -783,6 +882,7 @@ std::string handleTextCommand(const std::string& text, const Config& cfg) {
     if (text == "/services") return formatServicesReport();
     if (text == "/disk") return formatDiskReport();
     if (text == "/net") return formatNetReport();
+    if (text == "/power") return formatPowerMenu(cfg);
 
     const std::string restartPrefix = "/restart ";
     if (text.rfind(restartPrefix, 0) == 0) {
@@ -795,7 +895,7 @@ std::string handleTextCommand(const std::string& text, const Config& cfg) {
         return restartUnit(unit, cfg);
     }
 
-    return codeBlock("Commands: /start /status /services /disk /net /restart bot-name.service");
+    return codeBlock("Commands: /start /status /services /disk /net /power /restart bot-name.service");
 }
 
 int main() {
@@ -880,7 +980,7 @@ int main() {
         auto now = std::chrono::steady_clock::now();
         if (cfg.autoRefreshSec > 0 &&
             now - lastRefreshAt >= std::chrono::seconds(cfg.autoRefreshSec)) {
-            editDashboard(cfg, dashboardMessageId, formatTelemetry(cfg), mainKeyboardJson());
+            editDashboard(cfg, dashboardMessageId, formatTelemetry(cfg), mainKeyboardJson(cfg));
             lastRefreshAt = now;
         }
 

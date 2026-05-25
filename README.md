@@ -13,11 +13,12 @@
 - Отдельный сетевой отчет: hostname, IP, ping до `1.1.1.1`, входящий и исходящий трафик по интерфейсам.
 - Отображение отчетов в Telegram как `cpp` code block.
 - Текстовые прогресс-бары для RAM, swap и дисков.
-- Inline-кнопки `Обновить`, `SERVICES`, `DISK` и `NET`.
-- Команды `/start`, `/status`, `/services`, `/disk`, `/net`.
+- Inline-кнопки `Обновить`, `SERVICES`, `DISK`, `NET` и опционально `POWER`.
+- Команды `/start`, `/status`, `/services`, `/disk`, `/net`, `/power`.
 - Предупреждения по температуре, load average, RAM, дискам и упавшим `bot-*` сервисам.
 - Опциональный restart `bot-*.service` через команду `/restart` и кнопки в экране `SERVICES`.
 - Пагинация кнопок restart, чтобы список сервисов оставался удобным при большом количестве ботов.
+- Опциональное управление питанием Raspberry Pi: перезагрузка и выключение с экраном подтверждения.
 - Хранение `BOT_TOKEN` и `CHAT_ID` только в переменных окружения.
 - Проверка `CHAT_ID`: бот отвечает только разрешенному чату.
 - Корректное кодирование параметров Telegram API и логирование ошибок API в stderr.
@@ -31,6 +32,7 @@
 - `SERVICES` показывает статус сервисов `bot-*.service`.
 - `DISK` показывает использование уникальных файловых систем для `/`, `/home` и `/var/log`.
 - `NET` показывает hostname, IP, ping до `1.1.1.1` и накопленный RX/TX по сетевым интерфейсам.
+- `POWER` открывает меню перезагрузки и выключения, если включен `BOT_ALLOW_POWER_CONTROL=1`.
 
 Дальше процесс постоянно опрашивает Telegram Bot API через `getUpdates`. При нажатии кнопки бот редактирует уже существующее сообщение через `editMessageText`, поэтому чат не засоряется повторяющимися отчетами.
 
@@ -101,6 +103,7 @@ export CHAT_ID="ваш_chat_id"
 | `/services` | Показать `bot-*.service` |
 | `/disk` | Показать использование дисков |
 | `/net` | Показать сетевой отчет |
+| `/power` | Открыть меню перезагрузки и выключения, если включен `BOT_ALLOW_POWER_CONTROL=1` |
 | `/restart bot-name.service` | Перезапустить сервис, если включен `BOT_ALLOW_SERVICE_CONTROL=1` |
 
 ## Отчет по дискам
@@ -184,6 +187,44 @@ entropia ALL=(root) NOPASSWD: /usr/bin/systemctl restart bot-*.service
 
 Проверьте путь к `systemctl` командой `command -v systemctl`; на большинстве Debian/Ubuntu/Raspberry Pi OS это `/usr/bin/systemctl`.
 
+## Управление питанием
+
+Кнопка `POWER` по умолчанию скрыта. Чтобы включить управление перезагрузкой и выключением Raspberry Pi, задайте:
+
+```bash
+export BOT_ALLOW_POWER_CONTROL=1
+```
+
+После этого в основной клавиатуре появится кнопка `POWER`. Она открывает меню:
+
+```text
+Перезагрузка   Выключение
+STATUS         SERVICES
+DISK           NET
+```
+
+Нажатие `Перезагрузка` или `Выключение` сначала показывает экран подтверждения. Только кнопка `Да, выполнить` запускает команду:
+
+```bash
+sudo -n systemctl reboot
+sudo -n systemctl poweroff
+```
+
+Если монитор-бот запущен не от root, пользователю сервиса нужно дать права без интерактивного пароля:
+
+```bash
+sudo visudo -f /etc/sudoers.d/system_monitor_bot
+```
+
+Пример для пользователя `entropia`:
+
+```text
+entropia ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+entropia ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
+```
+
+Не включайте `BOT_ALLOW_POWER_CONTROL` для публичных или общих чатов. Бот проверяет `CHAT_ID`, но команды питания все равно лучше держать доступными только владельцу сервера.
+
 ## Переменные окружения
 
 | Переменная | Описание |
@@ -198,6 +239,7 @@ entropia ALL=(root) NOPASSWD: /usr/bin/systemctl restart bot-*.service
 | `ALERT_INTERVAL_SEC` | Минимальный интервал между alert-проверками, по умолчанию `300` |
 | `AUTO_REFRESH_SEC` | Автообновление dashboard-сообщения, по умолчанию выключено (`0`) |
 | `BOT_ALLOW_SERVICE_CONTROL` | Разрешить restart `bot-*.service` командами и кнопками, по умолчанию выключено |
+| `BOT_ALLOW_POWER_CONTROL` | Показать `POWER` и разрешить reboot/poweroff через подтверждение, по умолчанию выключено |
 
 ## Пример systemd unit
 
@@ -217,6 +259,7 @@ Environment=TEMP_WARN=75
 Environment=RAM_WARN=90
 Environment=DISK_WARN=90
 # Environment=BOT_ALLOW_SERVICE_CONTROL=1
+# Environment=BOT_ALLOW_POWER_CONTROL=1
 Restart=always
 RestartSec=5
 
@@ -233,5 +276,5 @@ WantedBy=multi-user.target
 - Сетевой трафик читается из `/proc/net/dev`.
 - Список сервисов читается через `systemctl list-units --type=service --all`.
 - Перезапуск сервисов выполняется командой `sudo -n systemctl restart bot-name.service`.
+- Перезагрузка и выключение выполняются командами `sudo -n systemctl reboot` и `sudo -n systemctl poweroff`.
 - Бот логирует ошибки Telegram API в stderr.
-

@@ -3,19 +3,23 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4.svg)](https://core.telegram.org/bots/api)
 
-Легковесный Telegram-бот для мониторинга Raspberry Pi и Linux-сервера. Бот показывает системную телеметрию, диски, сеть, состояние `systemd`-сервисов с именами вида `bot-*.service`, умеет перезапускать эти сервисы кнопками и отправляет предупреждения при проблемах.
+Легковесный Telegram-бот для мониторинга Raspberry Pi и Linux-сервера. Бот показывает системную телеметрию, диски, сеть, состояние `systemd`-сервисов с именами вида `bot-*.service`, умеет перезапускать эти сервисы кнопками и отправляет предупреждения только при смене уровня состояния.
 
 ## Возможности
 
 - Отчет по серверу: температура CPU в `°C`, load average, RAM, swap, частота CPU, локальный IP, throttling и uptime.
-- Информативный статус: температура, нагрузка, RAM, заполнение диска и состояние bot-сервисов в одной строке.
+- Информативный статус с уровнями `OK/WARN/CRIT`: температура, нагрузка, RAM, диск и состояние bot-сервисов.
+- Гистерезис уровней (`LEVEL_HYSTERESIS`) для защиты от "дребезга" на порогах.
+- Алерты только при переходах уровня (`OK -> WARN`, `WARN -> CRIT`, и обратно), без периодического спама.
+- Health score `0..100` в основном экране.
+- История замеров с кнопкой `HISTORY` и командой `/history`.
 - Отдельный красивый отчет по дискам: общий размер, занято, свободно и текстовый progress bar.
 - Отдельный сетевой отчет: hostname, IP, ping до `1.1.1.1`, входящий и исходящий трафик по интерфейсам.
 - Отображение отчетов в Telegram как `cpp` code block.
 - Текстовые прогресс-бары для RAM, swap и дисков.
-- Inline-кнопки `Обновить`, `SERVICES`, `DISK`, `NET` и опционально `POWER`.
-- Команды `/start`, `/status`, `/services`, `/disk`, `/net`, `/power`.
-- Предупреждения по температуре, load average, RAM, дискам и упавшим `bot-*` сервисам.
+- Inline-кнопки `Обновить`, `SERVICES`, `DISK`, `NET`, `HISTORY` и опционально `POWER`.
+- Команды `/start`, `/status`, `/services`, `/disk`, `/net`, `/history`, `/power`.
+- Предупреждения по температуре, load average, RAM, дискам и упавшим `bot-*` сервисам с сохранением предыдущего уровня в state-файле.
 - Опциональный restart `bot-*.service` через команду `/restart` и кнопки в экране `SERVICES`.
 - Пагинация кнопок restart, чтобы список сервисов оставался удобным при большом количестве ботов.
 - Опциональное управление питанием Raspberry Pi: перезагрузка и выключение с экраном подтверждения.
@@ -23,6 +27,7 @@
 - Проверка `CHAT_ID`: бот отвечает только разрешенному чату.
 - Корректное кодирование параметров Telegram API и логирование ошибок API в stderr.
 - Аккуратное завершение по `SIGINT` и `SIGTERM`.
+- Мини-самотесты критичной логики при старте (уровни и расчет памяти сервисов).
 
 ## Как это работает
 
@@ -32,6 +37,7 @@
 - `SERVICES` показывает статус сервисов `bot-*.service`.
 - `DISK` показывает использование уникальных файловых систем для `/`, `/home` и `/var/log`.
 - `NET` показывает hostname, IP, ping до `1.1.1.1` и накопленный RX/TX по сетевым интерфейсам.
+- `HISTORY` показывает последние сохраненные замеры: время, health, temp/load/ram/disk.
 - `POWER` открывает меню перезагрузки и выключения, если включен `BOT_ALLOW_POWER_CONTROL=1`.
 
 Дальше процесс постоянно опрашивает Telegram Bot API через `getUpdates`. При нажатии кнопки бот редактирует уже существующее сообщение через `editMessageText`, поэтому чат не засоряется повторяющимися отчетами.
@@ -41,13 +47,13 @@
 Пример системного статуса:
 
 ```text
-Status: Temp OK, Load OK, RAM OK, Disk 3%, Services OK
+Status: Temp OK, Load OK, RAM OK, Disk 3% OK, Services OK
 ```
 
 Если есть проблема, статус становится конкретным:
 
 ```text
-Status: Temp high, Load OK, RAM high, Disk 92% high, Services failed: 1
+Status: Temp WARN, Load OK, RAM CRIT, Disk 92% WARN, Services failed: 1
 ```
 
 ## Требования
@@ -103,6 +109,7 @@ export CHAT_ID="ваш_chat_id"
 | `/services` | Показать `bot-*.service` |
 | `/disk` | Показать использование дисков |
 | `/net` | Показать сетевой отчет |
+| `/history` | Показать последние замеры (история телеметрии) |
 | `/power` | Открыть меню перезагрузки и выключения, если включен `BOT_ALLOW_POWER_CONTROL=1` |
 | `/restart bot-name.service` | Перезапустить сервис, если включен `BOT_ALLOW_SERVICE_CONTROL=1` |
 
@@ -163,6 +170,7 @@ Restart bot-notifier.service
 <   Page 1/2   >
 Обновить   STATUS
 DISK       NET
+HISTORY
 ```
 
 Restart сервисов по умолчанию отключен. Чтобы включить его, задайте:
@@ -201,6 +209,7 @@ export BOT_ALLOW_POWER_CONTROL=1
 Перезагрузка   Выключение
 STATUS         SERVICES
 DISK           NET
+HISTORY
 ```
 
 Нажатие `Перезагрузка` или `Выключение` сначала показывает экран подтверждения. Только кнопка `Да, выполнить` запускает команду:
@@ -232,14 +241,20 @@ entropia ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 | `BOT_TOKEN` | Токен Telegram-бота от `@BotFather` |
 | `CHAT_ID` | ID чата, куда бот отправляет отчет |
 | `TEMP_WARN` | Порог температуры, по умолчанию `75` |
+| `TEMP_CRIT` | Критический порог температуры, по умолчанию `85` |
 | `LOAD_WARN` | Порог load average за 1 минуту, по умолчанию `3.5` |
-| `RAM_WARN` | Порог RAM в процентах, по умолчанию `90` |
+| `LOAD_CRIT` | Критический порог load average за 1 минуту, по умолчанию `5.0` |
+| `RAM_WARN` | Порог RAM в процентах, по умолчанию `80` |
+| `RAM_CRIT` | Критический порог RAM в процентах, по умолчанию `90` |
 | `DISK_WARN` | Порог заполнения диска в процентах, по умолчанию `90` |
+| `DISK_CRIT` | Критический порог заполнения диска в процентах, по умолчанию `95` |
+| `LEVEL_HYSTERESIS` | Гистерезис для уровней `WARN/CRIT`, по умолчанию `2.0` |
+| `HISTORY_SIZE` | Размер истории замеров, по умолчанию `120` (ограничено `10..500`) |
 | `POLL_TIMEOUT_SEC` | Таймаут long polling Telegram, по умолчанию `20` |
-| `ALERT_INTERVAL_SEC` | Минимальный интервал между alert-проверками, по умолчанию `300` |
-| `AUTO_REFRESH_SEC` | Автообновление dashboard-сообщения, по умолчанию выключено (`0`) |
+| `AUTO_REFRESH_SEC` | Автообновление dashboard-сообщения, по умолчанию `30` |
 | `BOT_ALLOW_SERVICE_CONTROL` | Разрешить restart `bot-*.service` командами и кнопками, по умолчанию выключено |
 | `BOT_ALLOW_POWER_CONTROL` | Показать `POWER` и разрешить reboot/poweroff через подтверждение, по умолчанию выключено |
+| `BOT_SELF_UNIT` | Имя собственного unit-файла бота для блокировки self-restart (опционально) |
 
 ## Пример systemd unit
 
@@ -256,10 +271,17 @@ ExecStart=/opt/SystemMonitorBot/system_monitor_bot
 Environment=BOT_TOKEN=your_bot_token
 Environment=CHAT_ID=your_chat_id
 Environment=TEMP_WARN=75
-Environment=RAM_WARN=90
+Environment=TEMP_CRIT=85
+Environment=RAM_WARN=80
+Environment=RAM_CRIT=90
 Environment=DISK_WARN=90
+Environment=DISK_CRIT=95
+Environment=LEVEL_HYSTERESIS=2
+Environment=HISTORY_SIZE=120
+Environment=AUTO_REFRESH_SEC=30
 # Environment=BOT_ALLOW_SERVICE_CONTROL=1
 # Environment=BOT_ALLOW_POWER_CONTROL=1
+# Environment=BOT_SELF_UNIT=bot-monitor.service
 Restart=always
 RestartSec=5
 
@@ -277,4 +299,6 @@ WantedBy=multi-user.target
 - Список сервисов читается через `systemctl list-units --type=service --all`.
 - Перезапуск сервисов выполняется командой `sudo -n systemctl restart bot-name.service`.
 - Перезагрузка и выключение выполняются командами `sudo -n systemctl reboot` и `sudo -n systemctl poweroff`.
+- История и состояние уровней сохраняются в `/tmp/systemmonitorbot-*.state`.
+- Команды оболочки выполняются с таймаутом и retry, чтобы не блокировать основной цикл бота.
 - Бот логирует ошибки Telegram API в stderr.

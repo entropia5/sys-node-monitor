@@ -2,8 +2,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdlib>
+#include <ctime>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +19,8 @@
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/statvfs.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
@@ -25,18 +30,34 @@ using json = nlohmann::json;
 
 std::atomic<bool> running(true);
 
+int acquireInstanceLock(const std::string& lockPath) {
+    int fd = open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 struct Config {
     std::string token;
     std::string chatId;
     double tempWarn = 75.0;
+    double tempCrit = 85.0;
     double loadWarn = 3.5;
-    double ramWarn = 90.0;
+    double loadCrit = 5.0;
+    double ramWarn = 80.0;
+    double ramCrit = 90.0;
     double diskWarn = 90.0;
+    double diskCrit = 95.0;
+    double hysteresis = 2.0;
+    int historySize = 120;
     int pollTimeoutSec = 20;
-    int alertIntervalSec = 300;
-    int autoRefreshSec = 0;
+    int autoRefreshSec = 30;
     bool allowServiceControl = false;
     bool allowPowerControl = false;
+    std::string selfUnit;
 };
 
 struct ApiResponse {
@@ -55,6 +76,37 @@ struct Telemetry {
     std::string localIp;
     std::string throttled;
     std::string status;
+};
+
+enum class Severity {
+    OK = 0,
+    WARN = 1,
+    CRIT = 2
+};
+
+struct TelemetryLevels {
+    Severity temp = Severity::OK;
+    Severity load = Severity::OK;
+    Severity ram = Severity::OK;
+    Severity disk = Severity::OK;
+    Severity services = Severity::OK;
+};
+
+struct HealthSnapshot {
+    std::time_t timestamp = 0;
+    double temp = 0.0;
+    double load = 0.0;
+    double ram = 0.0;
+    double disk = 0.0;
+    int score = 100;
+};
+
+struct DashboardData {
+    Telemetry telemetry;
+    double diskUsage = 0.0;
+    int failedServiceCount = 0;
+    TelemetryLevels levels;
+    std::string text;
 };
 
 struct DiskInfo {
@@ -86,16 +138,41 @@ std::string trim(std::string value) {
     return value;
 }
 
-std::string exec(const char* cmd) {
-    std::array<char, 256> buffer;
-    std::string result;
-    FILE* pipe = popen(cmd, "r");
-    if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-        result += buffer.data();
+std::string shellEscapeSingleQuotes(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (char c : value) {
+        if (c == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped += c;
+        }
     }
-    pclose(pipe);
-    return trim(result);
+    return escaped;
+}
+
+std::string exec(const std::string& cmd, int timeoutSec = 3, int retries = 1) {
+    std::string safeCmd = "timeout " + std::to_string(std::max(1, timeoutSec))
+        + " sh -c '" + shellEscapeSingleQuotes(cmd) + "'";
+    for (int attempt = 0; attempt <= retries; ++attempt) {
+        std::array<char, 256> buffer;
+        std::string result;
+        FILE* pipe = popen(safeCmd.c_str(), "r");
+        if (!pipe) return "";
+        while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+            result += buffer.data();
+        }
+        int rc = pclose(pipe);
+        std::string trimmed = trim(result);
+        if (rc == 0 || !trimmed.empty()) {
+            return trimmed;
+        }
+    }
+    return "";
+}
+
+std::string exec(const char* cmd) {
+    return exec(std::string(cmd), 3, 1);
 }
 
 double envDouble(const char* name, double fallback) {
@@ -141,14 +218,27 @@ Config loadConfig() {
     cfg.token = tokenEnv;
     cfg.chatId = chatIdEnv;
     cfg.tempWarn = envDouble("TEMP_WARN", cfg.tempWarn);
+    cfg.tempCrit = envDouble("TEMP_CRIT", cfg.tempCrit);
     cfg.loadWarn = envDouble("LOAD_WARN", cfg.loadWarn);
+    cfg.loadCrit = envDouble("LOAD_CRIT", cfg.loadCrit);
     cfg.ramWarn = envDouble("RAM_WARN", cfg.ramWarn);
+    cfg.ramCrit = envDouble("RAM_CRIT", cfg.ramCrit);
     cfg.diskWarn = envDouble("DISK_WARN", cfg.diskWarn);
+    cfg.diskCrit = envDouble("DISK_CRIT", cfg.diskCrit);
+    cfg.hysteresis = envDouble("LEVEL_HYSTERESIS", cfg.hysteresis);
+    cfg.historySize = envInt("HISTORY_SIZE", cfg.historySize);
+    if (cfg.tempCrit < cfg.tempWarn) cfg.tempCrit = cfg.tempWarn;
+    if (cfg.loadCrit < cfg.loadWarn) cfg.loadCrit = cfg.loadWarn;
+    if (cfg.ramCrit < cfg.ramWarn) cfg.ramCrit = cfg.ramWarn;
+    if (cfg.diskCrit < cfg.diskWarn) cfg.diskCrit = cfg.diskWarn;
+    if (cfg.hysteresis < 0.0) cfg.hysteresis = 0.0;
+    cfg.historySize = std::max(10, std::min(500, cfg.historySize));
     cfg.pollTimeoutSec = envInt("POLL_TIMEOUT_SEC", cfg.pollTimeoutSec);
-    cfg.alertIntervalSec = envInt("ALERT_INTERVAL_SEC", cfg.alertIntervalSec);
     cfg.autoRefreshSec = envInt("AUTO_REFRESH_SEC", cfg.autoRefreshSec);
     cfg.allowServiceControl = envBool("BOT_ALLOW_SERVICE_CONTROL");
     cfg.allowPowerControl = envBool("BOT_ALLOW_POWER_CONTROL");
+    const char* selfUnitEnv = std::getenv("BOT_SELF_UNIT");
+    cfg.selfUnit = selfUnitEnv ? trim(selfUnitEnv) : "";
     return cfg;
 }
 
@@ -299,6 +389,9 @@ std::string mainKeyboardJson(const Config& cfg) {
         json::array({
             {{"text", "DISK"}, {"callback_data", "disk"}},
             {{"text", "NET"}, {"callback_data", "net"}}
+        }),
+        json::array({
+            {{"text", "HISTORY"}, {"callback_data", "history"}}
         })
     });
 
@@ -318,21 +411,38 @@ std::string powerKeyboardJson();
 std::string powerConfirmKeyboardJson(const std::string& action);
 std::vector<DiskInfo> collectDisks();
 std::vector<std::string> failedBotUnits();
+std::string formatHistoryReport(const std::deque<HealthSnapshot>& history);
 
 constexpr std::size_t SERVICES_PER_PAGE = 5;
 
-Telemetry collectTelemetry(const Config& cfg) {
+Telemetry collectTelemetry() {
     Telemetry t;
     struct sysinfo mem {};
     if (sysinfo(&mem) == 0) {
-        unsigned long long totalRam = mem.totalram * static_cast<unsigned long long>(mem.mem_unit);
-        unsigned long long freeRam = mem.freeram * static_cast<unsigned long long>(mem.mem_unit);
-        unsigned long long totalSwap = mem.totalswap * static_cast<unsigned long long>(mem.mem_unit);
-        unsigned long long freeSwap = mem.freeswap * static_cast<unsigned long long>(mem.mem_unit);
+        const double totalSwap = static_cast<double>(mem.totalswap) * static_cast<double>(mem.mem_unit);
+        const double freeSwap = static_cast<double>(mem.freeswap) * static_cast<double>(mem.mem_unit);
 
-        if (totalRam > 0) t.ramPercent = 100.0 * (totalRam - freeRam) / totalRam;
-        if (totalSwap > 0) t.swapPercent = 100.0 * (totalSwap - freeSwap) / totalSwap;
+        if (totalSwap > 0.0) t.swapPercent = 100.0 * (totalSwap - freeSwap) / totalSwap;
         t.uptime = mem.uptime;
+    }
+
+    // Use MemAvailable for realistic Linux memory pressure accounting.
+    std::ifstream meminfo("/proc/meminfo");
+    if (meminfo) {
+        double memTotalKb = 0.0;
+        double memAvailableKb = 0.0;
+        std::string key;
+        double value = 0.0;
+        std::string unit;
+        while (meminfo >> key >> value >> unit) {
+            if (key == "MemTotal:") memTotalKb = value;
+            if (key == "MemAvailable:") memAvailableKb = value;
+        }
+        if (memTotalKb > 0.0) {
+            double used = memTotalKb - memAvailableKb;
+            t.ramPercent = 100.0 * used / memTotalKb;
+            t.ramPercent = std::max(0.0, std::min(100.0, t.ramPercent));
+        }
     }
 
     std::ifstream tempFile("/sys/class/thermal/thermal_zone0/temp");
@@ -361,27 +471,84 @@ Telemetry collectTelemetry(const Config& cfg) {
     return t;
 }
 
-std::string telemetryStatus(const Telemetry& t, const Config& cfg) {
-    std::vector<std::string> parts;
-
-    parts.push_back(t.temp >= cfg.tempWarn ? "Temp high" : "Temp OK");
-    parts.push_back(t.load[0] >= cfg.loadWarn ? "Load high" : "Load OK");
-    parts.push_back(t.ramPercent >= cfg.ramWarn ? "RAM high" : "RAM OK");
-
+double maxDiskUsagePercent() {
     double maxDisk = 0.0;
     for (const DiskInfo& disk : collectDisks()) {
         maxDisk = std::max(maxDisk, disk.usedPercent);
     }
-    std::ostringstream diskPart;
-    diskPart << "Disk " << static_cast<int>(maxDisk) << "%";
-    if (maxDisk >= cfg.diskWarn) diskPart << " high";
-    parts.push_back(diskPart.str());
+    return maxDisk;
+}
 
-    std::vector<std::string> failed = failedBotUnits();
-    if (failed.empty()) {
+Severity classifyWithHysteresis(
+    double value,
+    double warn,
+    double crit,
+    Severity previous,
+    double hysteresis
+) {
+    const double h = std::max(0.0, hysteresis);
+    if (previous == Severity::CRIT) {
+        if (value < crit - h) return (value >= warn ? Severity::WARN : Severity::OK);
+        return Severity::CRIT;
+    }
+    if (previous == Severity::WARN) {
+        if (value >= crit) return Severity::CRIT;
+        if (value < warn - h) return Severity::OK;
+        return Severity::WARN;
+    }
+    if (value >= crit) return Severity::CRIT;
+    if (value >= warn) return Severity::WARN;
+    return Severity::OK;
+}
+
+std::string severityText(Severity severity) {
+    if (severity == Severity::CRIT) return "CRIT";
+    if (severity == Severity::WARN) return "WARN";
+    return "OK";
+}
+
+int healthScore(const TelemetryLevels& levels) {
+    int penalty = 0;
+    auto addPenalty = [&](Severity s, int warnPenalty, int critPenalty) {
+        if (s == Severity::CRIT) penalty += critPenalty;
+        else if (s == Severity::WARN) penalty += warnPenalty;
+    };
+    addPenalty(levels.temp, 10, 22);
+    addPenalty(levels.load, 10, 22);
+    addPenalty(levels.ram, 14, 28);
+    addPenalty(levels.disk, 12, 25);
+    addPenalty(levels.services, 20, 35);
+    return std::max(0, 100 - penalty);
+}
+
+TelemetryLevels evaluateLevels(
+    const Telemetry& t,
+    const Config& cfg,
+    const TelemetryLevels& previous,
+    double diskUsage,
+    int failedServiceCount
+) {
+    TelemetryLevels levels;
+    levels.temp = classifyWithHysteresis(t.temp, cfg.tempWarn, cfg.tempCrit, previous.temp, cfg.hysteresis);
+    levels.load = classifyWithHysteresis(t.load[0], cfg.loadWarn, cfg.loadCrit, previous.load, cfg.hysteresis);
+    levels.ram = classifyWithHysteresis(t.ramPercent, cfg.ramWarn, cfg.ramCrit, previous.ram, cfg.hysteresis);
+    levels.disk = classifyWithHysteresis(diskUsage, cfg.diskWarn, cfg.diskCrit, previous.disk, cfg.hysteresis);
+    levels.services = failedServiceCount > 0 ? Severity::CRIT : Severity::OK;
+    return levels;
+}
+
+std::string telemetryStatus(const TelemetryLevels& levels, double diskUsage, int failedServiceCount) {
+    std::vector<std::string> parts;
+    std::ostringstream diskPart;
+    diskPart << "Disk " << static_cast<int>(diskUsage) << "% " << severityText(levels.disk);
+    parts.push_back("Temp " + severityText(levels.temp));
+    parts.push_back("Load " + severityText(levels.load));
+    parts.push_back("RAM " + severityText(levels.ram));
+    parts.push_back(diskPart.str());
+    if (failedServiceCount == 0) {
         parts.push_back("Services OK");
     } else {
-        parts.push_back("Services failed: " + std::to_string(failed.size()));
+        parts.push_back("Services failed: " + std::to_string(failedServiceCount));
     }
 
     std::ostringstream status;
@@ -392,9 +559,12 @@ std::string telemetryStatus(const Telemetry& t, const Config& cfg) {
     return status.str();
 }
 
-std::string formatTelemetry(const Config& cfg) {
-    Telemetry t = collectTelemetry(cfg);
-
+std::string formatTelemetry(
+    const Telemetry& t,
+    const TelemetryLevels& levels,
+    double diskUsage,
+    int failedServiceCount
+) {
     std::ostringstream oss;
     oss << "System RPi Server Report:\n\n";
     oss << std::left << std::setw(12) << "TEMP" << "> " << std::fixed << std::setprecision(1) << t.temp << " °C\n";
@@ -405,9 +575,20 @@ std::string formatTelemetry(const Config& cfg) {
     oss << std::left << std::setw(12) << "IP" << "> " << t.localIp << "\n";
     oss << std::left << std::setw(12) << "THROTTLED" << "> " << t.throttled << "\n";
     oss << std::left << std::setw(12) << "UPTIME" << "> " << t.uptime / 3600 << "H " << (t.uptime % 3600) / 60 << "M\n\n";
-    oss << "Status: " << telemetryStatus(t, cfg);
+    oss << "HEALTH" << " > " << healthScore(levels) << "/100\n";
+    oss << "Status: " << telemetryStatus(levels, diskUsage, failedServiceCount);
 
     return codeBlock(oss.str());
+}
+
+DashboardData buildDashboardData(const Config& cfg, const TelemetryLevels& previousLevels) {
+    DashboardData data;
+    data.telemetry = collectTelemetry();
+    data.diskUsage = maxDiskUsagePercent();
+    data.failedServiceCount = static_cast<int>(failedBotUnits().size());
+    data.levels = evaluateLevels(data.telemetry, cfg, previousLevels, data.diskUsage, data.failedServiceCount);
+    data.text = formatTelemetry(data.telemetry, data.levels, data.diskUsage, data.failedServiceCount);
+    return data;
 }
 
 DiskInfo readDisk(const std::string& mount) {
@@ -419,8 +600,9 @@ DiskInfo readDisk(const std::string& mount) {
         return info;
     }
 
-    double total = static_cast<double>(fs.f_blocks) * fs.f_frsize;
-    double available = static_cast<double>(fs.f_bavail) * fs.f_frsize;
+    const double blockSize = static_cast<double>(fs.f_frsize);
+    const double total = static_cast<double>(fs.f_blocks) * blockSize;
+    const double available = static_cast<double>(fs.f_bavail) * blockSize;
     double used = total - available;
 
     info.usedPercent = total > 0 ? 100.0 * used / total : 0.0;
@@ -551,28 +733,34 @@ std::size_t servicesPageFromView(const std::string& view) {
     }
 }
 
+double parseServiceMemoryMb(const std::string& memoryValue, bool fromPsFallback) {
+    if (memoryValue.empty() || memoryValue == "0" || memoryValue == "[not set]") return 0.1;
+    const long long value = std::stoll(memoryValue);
+    if (value <= 0) return 0.1;
+    const double asDouble = static_cast<double>(value);
+    double mb = fromPsFallback ? (asDouble / 1024.0) : (asDouble / 1024.0 / 1024.0);
+    return std::max(0.1, mb);
+}
+
 std::string serviceMemory(const std::string& unit) {
     std::string memStr = exec(("systemctl show " + unit + " -p MemoryCurrent --value").c_str());
+    bool fromPsFallback = false;
 
     if (memStr == "0" || memStr == "[not set]" || memStr.empty()) {
         std::string procName = unit.substr(0, unit.size() - 8);
         std::string psCmd = "ps -C " + procName + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
         memStr = exec(psCmd.c_str());
+        fromPsFallback = true;
     }
 
     try {
-        if (!memStr.empty() && memStr != "0") {
-            long long value = std::stoll(memStr);
-            double mb = (value > 2000000) ? (value / 1024.0 / 1024.0) : (value / 1024.0);
-            if (mb < 0.1) mb = 0.1;
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(1) << mb << "M";
-            return oss.str();
-        }
+        double mb = parseServiceMemoryMb(memStr, fromPsFallback);
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(1) << mb << "M";
+        return oss.str();
     } catch (...) {
         return "N/A";
     }
-    return "0.1M";
 }
 
 std::string formatServicesReport() {
@@ -648,6 +836,9 @@ std::string servicesKeyboardJson(std::size_t page) {
         {{"text", "DISK"}, {"callback_data", "disk"}},
         {{"text", "NET"}, {"callback_data", "net"}}
     }));
+    rows.push_back(json::array({
+        {{"text", "HISTORY"}, {"callback_data", "history"}}
+    }));
 
     json keyboard = {{"inline_keyboard", rows}};
     return keyboard.dump();
@@ -667,6 +858,9 @@ std::string powerKeyboardJson() {
             {
                 {{"text", "DISK"}, {"callback_data", "disk"}},
                 {{"text", "NET"}, {"callback_data", "net"}}
+            },
+            {
+                {{"text", "HISTORY"}, {"callback_data", "history"}}
             }
         }}
     };
@@ -689,6 +883,7 @@ std::string keyboardForView(const std::string& view, const Config& cfg) {
     if ((view == "services" || view.rfind("services:", 0) == 0) && cfg.allowServiceControl) {
         return servicesKeyboardJson(servicesPageFromView(view));
     }
+    if (view == "history") return mainKeyboardJson(cfg);
     if (view == "power" && cfg.allowPowerControl) return powerKeyboardJson();
     if (view == "power:ask:reboot" && cfg.allowPowerControl) return powerConfirmKeyboardJson("reboot");
     if (view == "power:ask:poweroff" && cfg.allowPowerControl) return powerConfirmKeyboardJson("poweroff");
@@ -707,6 +902,9 @@ std::string restartUnit(const std::string& unit, const Config& cfg) {
     std::vector<std::string> units = botUnits();
     if (std::find(units.begin(), units.end(), unit) == units.end()) {
         return codeBlock("Unit not found: " + unit);
+    }
+    if (!cfg.selfUnit.empty() && unit == cfg.selfUnit) {
+        return codeBlock("Refused. Self-restart is blocked for " + unit + ".");
     }
 
     std::string result = exec(("sudo -n systemctl restart " + unit + " 2>&1 && echo OK || echo FAIL").c_str());
@@ -767,49 +965,190 @@ std::vector<std::string> failedBotUnits() {
     return failed;
 }
 
-std::string buildAlertText(const Config& cfg) {
-    Telemetry t = collectTelemetry(cfg);
-    std::vector<std::string> alerts;
+int fetchLatestUpdateId(const Config& cfg) {
+    ApiResponse response = callApi("getUpdates", {
+        {"offset", "-1"},
+        {"timeout", "1"},
+        {"allowed_updates", "[\"message\",\"callback_query\"]"}
+    }, cfg);
 
-    if (t.temp >= cfg.tempWarn) alerts.push_back("TEMP " + std::to_string(static_cast<int>(t.temp)) + "C");
-    if (t.load[0] >= cfg.loadWarn) alerts.push_back("LOAD " + std::to_string(t.load[0]).substr(0, 4));
-    if (t.ramPercent >= cfg.ramWarn) alerts.push_back("RAM " + std::to_string(static_cast<int>(t.ramPercent)) + "%");
+    if (!response.ok || response.body.empty()) return 0;
 
-    for (const DiskInfo& disk : collectDisks()) {
-        if (disk.usedPercent >= cfg.diskWarn) {
-            alerts.push_back("DISK " + disk.mount + " " + std::to_string(static_cast<int>(disk.usedPercent)) + "%");
-        }
+    try {
+        json parsed = json::parse(response.body);
+        if (!parsed.contains("result") || !parsed["result"].is_array() || parsed["result"].empty()) return 0;
+        return parsed["result"].back().value("update_id", 0);
+    } catch (...) {
+        return 0;
     }
+}
 
-    std::vector<std::string> failed = failedBotUnits();
-    for (const auto& unit : failed) {
-        alerts.push_back("SERVICE " + unit + " failed");
+int loadMessageIdState(const std::string& path) {
+    std::ifstream in(path);
+    int messageId = 0;
+    if (!(in >> messageId)) return 0;
+    return messageId;
+}
+
+void saveMessageIdState(const std::string& path, int messageId) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return;
+    out << messageId;
+}
+
+int loadIntState(const std::string& path) {
+    std::ifstream in(path);
+    int value = 0;
+    if (!(in >> value)) return 0;
+    return value;
+}
+
+void saveIntState(const std::string& path, int value) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return;
+    out << value;
+}
+
+TelemetryLevels loadLevelsState(const std::string& path) {
+    TelemetryLevels levels;
+    std::ifstream in(path);
+    int t = 0, l = 0, r = 0, d = 0, s = 0;
+    if (!(in >> t >> l >> r >> d >> s)) return levels;
+    auto toSeverity = [](int v) {
+        if (v >= 2) return Severity::CRIT;
+        if (v == 1) return Severity::WARN;
+        return Severity::OK;
+    };
+    levels.temp = toSeverity(t);
+    levels.load = toSeverity(l);
+    levels.ram = toSeverity(r);
+    levels.disk = toSeverity(d);
+    levels.services = toSeverity(s);
+    return levels;
+}
+
+void saveLevelsState(const std::string& path, const TelemetryLevels& levels) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return;
+    out << static_cast<int>(levels.temp) << " "
+        << static_cast<int>(levels.load) << " "
+        << static_cast<int>(levels.ram) << " "
+        << static_cast<int>(levels.disk) << " "
+        << static_cast<int>(levels.services);
+}
+
+std::deque<HealthSnapshot> loadHistoryState(const std::string& path, int maxItems) {
+    std::deque<HealthSnapshot> history;
+    std::ifstream in(path);
+    if (!in) return history;
+
+    HealthSnapshot s;
+    while (in >> s.timestamp >> s.temp >> s.load >> s.ram >> s.disk >> s.score) {
+        history.push_back(s);
+        while (static_cast<int>(history.size()) > maxItems) history.pop_front();
     }
+    return history;
+}
 
-    if (alerts.empty()) return "";
+void saveHistoryState(const std::string& path, const std::deque<HealthSnapshot>& history) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return;
+    for (const auto& s : history) {
+        out << s.timestamp << " " << s.temp << " " << s.load << " "
+            << s.ram << " " << s.disk << " " << s.score << "\n";
+    }
+}
 
+void appendHistory(std::deque<HealthSnapshot>& history, const HealthSnapshot& snapshot, int maxItems) {
+    history.push_back(snapshot);
+    while (static_cast<int>(history.size()) > maxItems) history.pop_front();
+}
+
+std::string formatHistoryReport(const std::deque<HealthSnapshot>& history) {
     std::ostringstream oss;
-    oss << "Alert\n\n";
-    for (const auto& alert : alerts) {
-        oss << "! " << alert << "\n";
+    oss << "History (latest samples):\n\n";
+    if (history.empty()) {
+        oss << "No samples yet.\n";
+        return codeBlock(oss.str());
+    }
+
+    oss << std::left << std::setw(6) << "TIME"
+        << std::setw(7) << "HEALTH"
+        << std::setw(7) << "TEMP"
+        << std::setw(7) << "LOAD"
+        << std::setw(7) << "RAM"
+        << "DISK\n\n";
+
+    std::size_t start = history.size() > 15 ? history.size() - 15 : 0;
+    for (std::size_t i = start; i < history.size(); ++i) {
+        std::tm tmValue {};
+        std::time_t ts = history[i].timestamp;
+        localtime_r(&ts, &tmValue);
+        char timeBuf[16] = {0};
+        std::strftime(timeBuf, sizeof(timeBuf), "%H:%M", &tmValue);
+
+        oss << std::left << std::setw(6) << timeBuf
+            << std::setw(7) << history[i].score
+            << std::setw(7) << static_cast<int>(history[i].temp)
+            << std::setw(7) << std::fixed << std::setprecision(1) << history[i].load
+            << std::setw(7) << static_cast<int>(history[i].ram)
+            << static_cast<int>(history[i].disk) << "\n";
     }
     return codeBlock(oss.str());
 }
 
-void sendMessage(const Config& cfg, const std::string& text) {
+std::string levelTransitionMessage(
+    const std::string& name,
+    Severity previous,
+    Severity current,
+    double value
+) {
+    if (previous == current) return "";
+    std::ostringstream oss;
+    oss << name << ": " << severityText(previous) << " -> " << severityText(current)
+        << " (" << std::fixed << std::setprecision(1) << value << ")";
+    return oss.str();
+}
+
+void sendLevelAlerts(
+    const Config& cfg,
+    const TelemetryLevels& previous,
+    const TelemetryLevels& current,
+    const Telemetry& telemetry,
+    double diskUsage,
+    int failedServiceCount
+) {
+    std::vector<std::string> changes;
+    auto pushIfChanged = [&](const std::string& line) {
+        if (!line.empty()) changes.push_back(line);
+    };
+    pushIfChanged(levelTransitionMessage("Temp", previous.temp, current.temp, telemetry.temp));
+    pushIfChanged(levelTransitionMessage("Load", previous.load, current.load, telemetry.load[0]));
+    pushIfChanged(levelTransitionMessage("RAM", previous.ram, current.ram, telemetry.ramPercent));
+    pushIfChanged(levelTransitionMessage("Disk", previous.disk, current.disk, diskUsage));
+    if (previous.services != current.services) {
+        std::ostringstream oss;
+        oss << "Services: " << severityText(previous.services) << " -> " << severityText(current.services)
+            << " (" << failedServiceCount << " failed)";
+        changes.push_back(oss.str());
+    }
+    if (changes.empty()) return;
+
+    std::ostringstream text;
+    text << "Alert state changed\n\n";
+    for (const auto& line : changes) text << line << "\n";
     callApi("sendMessage", {
         {"chat_id", cfg.chatId},
         {"parse_mode", "MarkdownV2"},
-        {"text", text},
-        {"reply_markup", mainKeyboardJson(cfg)}
+        {"text", codeBlock(text.str())}
     }, cfg);
 }
 
-int sendDashboard(const Config& cfg) {
+int sendDashboard(const Config& cfg, const std::string& dashboardText) {
     ApiResponse response = callApi("sendMessage", {
         {"chat_id", cfg.chatId},
         {"parse_mode", "MarkdownV2"},
-        {"text", formatTelemetry(cfg)},
+        {"text", dashboardText},
         {"reply_markup", mainKeyboardJson(cfg)}
     }, cfg);
 
@@ -821,21 +1160,29 @@ int sendDashboard(const Config& cfg) {
     }
 }
 
-void editDashboard(const Config& cfg, int messageId, const std::string& text, const std::string& replyMarkup) {
-    if (messageId <= 0) return;
-    callApi("editMessageText", {
+bool editDashboard(const Config& cfg, int messageId, const std::string& text, const std::string& replyMarkup) {
+    if (messageId <= 0) return false;
+    ApiResponse response = callApi("editMessageText", {
         {"chat_id", cfg.chatId},
         {"message_id", std::to_string(messageId)},
         {"parse_mode", "MarkdownV2"},
         {"text", text},
         {"reply_markup", replyMarkup}
     }, cfg);
+    if (response.ok) return true;
+    return response.body.find("message is not modified") != std::string::npos;
 }
 
-std::string reportForCallback(const std::string& data, const Config& cfg) {
+std::string reportForCallback(
+    const std::string& data,
+    const Config& cfg,
+    const std::deque<HealthSnapshot>& history,
+    const TelemetryLevels& levels
+) {
     if (data == "services" || data.rfind("services:", 0) == 0) return formatServicesReport();
     if (data == "disk") return formatDiskReport();
     if (data == "net") return formatNetReport();
+    if (data == "history") return formatHistoryReport(history);
     if (data == "power") return formatPowerMenu(cfg);
     if (data == "power:ask:reboot") return formatPowerConfirm("reboot", cfg);
     if (data == "power:ask:poweroff") return formatPowerConfirm("poweroff", cfg);
@@ -851,12 +1198,14 @@ std::string reportForCallback(const std::string& data, const Config& cfg) {
         }
         return restartUnit(payload, cfg) + "\n\n" + formatServicesReport();
     }
-    return formatTelemetry(cfg);
+    DashboardData dataSnapshot = buildDashboardData(cfg, levels);
+    return dataSnapshot.text;
 }
 
 std::string viewForCallback(const std::string& data) {
     if (data == "services" || data.rfind("services:", 0) == 0) return data;
     if (data == "power") return "power";
+    if (data == "history") return "history";
     if (data == "power:ask:reboot") return "power:ask:reboot";
     if (data == "power:ask:poweroff") return "power:ask:poweroff";
     if (data.rfind("power:confirm:", 0) == 0) return "status";
@@ -874,14 +1223,24 @@ std::string viewForCallback(const std::string& data) {
 std::string keyboardForTextCommand(const std::string& text, const Config& cfg) {
     if (text == "/services") return keyboardForView("services", cfg);
     if (text == "/power") return keyboardForView("power", cfg);
+    if (text == "/history") return keyboardForView("history", cfg);
     return mainKeyboardJson(cfg);
 }
 
-std::string handleTextCommand(const std::string& text, const Config& cfg) {
-    if (text == "/start" || text == "/status") return formatTelemetry(cfg);
+std::string handleTextCommand(
+    const std::string& text,
+    const Config& cfg,
+    const std::deque<HealthSnapshot>& history,
+    const TelemetryLevels& levels
+) {
+    if (text == "/start" || text == "/status") {
+        DashboardData dataSnapshot = buildDashboardData(cfg, levels);
+        return dataSnapshot.text;
+    }
     if (text == "/services") return formatServicesReport();
     if (text == "/disk") return formatDiskReport();
     if (text == "/net") return formatNetReport();
+    if (text == "/history") return formatHistoryReport(history);
     if (text == "/power") return formatPowerMenu(cfg);
 
     const std::string restartPrefix = "/restart ";
@@ -895,10 +1254,43 @@ std::string handleTextCommand(const std::string& text, const Config& cfg) {
         return restartUnit(unit, cfg);
     }
 
-    return codeBlock("Commands: /start /status /services /disk /net /power /restart bot-name.service");
+    return codeBlock("Commands: /start /status /services /disk /net /history /power /restart bot-name.service");
+}
+
+bool nearlyEqual(double a, double b, double eps = 0.01) {
+    return std::fabs(a - b) <= eps;
+}
+
+bool runSelfTests() {
+    bool ok = true;
+    auto expect = [&](bool condition, const std::string& name) {
+        if (!condition) {
+            ok = false;
+            std::cerr << "Self-test failed: " << name << "\n";
+        }
+    };
+
+    expect(classifyWithHysteresis(70.0, 80.0, 90.0, Severity::OK, 2.0) == Severity::OK, "level ok");
+    expect(classifyWithHysteresis(82.0, 80.0, 90.0, Severity::OK, 2.0) == Severity::WARN, "level warn enter");
+    expect(classifyWithHysteresis(79.0, 80.0, 90.0, Severity::WARN, 2.0) == Severity::WARN, "level warn hold");
+    expect(classifyWithHysteresis(77.0, 80.0, 90.0, Severity::WARN, 2.0) == Severity::OK, "level warn exit");
+    expect(classifyWithHysteresis(91.0, 80.0, 90.0, Severity::WARN, 2.0) == Severity::CRIT, "level crit enter");
+    expect(classifyWithHysteresis(89.0, 80.0, 90.0, Severity::CRIT, 2.0) == Severity::CRIT, "level crit hold");
+    expect(classifyWithHysteresis(87.0, 80.0, 90.0, Severity::CRIT, 2.0) == Severity::WARN, "level crit exit");
+
+    expect(nearlyEqual(parseServiceMemoryMb("104857600", false), 100.0), "memory bytes to mb");
+    expect(nearlyEqual(parseServiceMemoryMb("102400", true), 100.0), "memory kb to mb");
+    expect(nearlyEqual(parseServiceMemoryMb("0", false), 0.1), "memory minimum floor");
+    return ok;
 }
 
 int main() {
+    int instanceLockFd = acquireInstanceLock("/tmp/systemmonitorbot.lock");
+    if (instanceLockFd < 0) {
+        std::cerr << "Another SystemMonitorBot instance is already running\n";
+        return 1;
+    }
+
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
@@ -912,11 +1304,37 @@ int main() {
         curl_global_cleanup();
         return 1;
     }
+    if (!runSelfTests()) {
+        std::cerr << "Self-tests failed, refusing to start\n";
+        curl_global_cleanup();
+        return 1;
+    }
 
-    callApi("getUpdates", {{"offset", "-1"}}, cfg);
-    int dashboardMessageId = sendDashboard(cfg);
-    int lastUpdateId = 0;
-    auto lastAlertAt = std::chrono::steady_clock::now() - std::chrono::seconds(cfg.alertIntervalSec);
+    const std::string dashboardStatePath = "/tmp/systemmonitorbot-dashboard-message-id.state";
+    const std::string updatesStatePath = "/tmp/systemmonitorbot-last-update-id.state";
+    const std::string levelsStatePath = "/tmp/systemmonitorbot-levels.state";
+    const std::string historyStatePath = "/tmp/systemmonitorbot-history.state";
+
+    TelemetryLevels levels = loadLevelsState(levelsStatePath);
+    std::deque<HealthSnapshot> history = loadHistoryState(historyStatePath, cfg.historySize);
+
+    DashboardData bootData = buildDashboardData(cfg, levels);
+    appendHistory(history, {std::time(nullptr), bootData.telemetry.temp, bootData.telemetry.load[0], bootData.telemetry.ramPercent, bootData.diskUsage, healthScore(bootData.levels)}, cfg.historySize);
+    levels = bootData.levels;
+    saveLevelsState(levelsStatePath, levels);
+    saveHistoryState(historyStatePath, history);
+
+    int lastUpdateId = std::max(fetchLatestUpdateId(cfg), loadIntState(updatesStatePath));
+    int dashboardMessageId = loadMessageIdState(dashboardStatePath);
+    if (dashboardMessageId > 0) {
+        if (!editDashboard(cfg, dashboardMessageId, bootData.text, mainKeyboardJson(cfg))) {
+            dashboardMessageId = 0;
+        }
+    }
+    if (dashboardMessageId <= 0) {
+        dashboardMessageId = sendDashboard(cfg, bootData.text);
+        if (dashboardMessageId > 0) saveMessageIdState(dashboardStatePath, dashboardMessageId);
+    }
     auto lastRefreshAt = std::chrono::steady_clock::now();
 
     while (running) {
@@ -931,6 +1349,7 @@ int main() {
             if (payload.contains("result") && payload["result"].is_array()) {
                 for (auto& update : payload["result"]) {
                     lastUpdateId = update.value("update_id", lastUpdateId);
+                    saveIntState(updatesStatePath, lastUpdateId);
 
                     if (update.contains("callback_query")) {
                         auto& cb = update["callback_query"];
@@ -947,9 +1366,8 @@ int main() {
                         }
 
                         int msgId = cb["message"].value("message_id", 0);
-                        dashboardMessageId = msgId;
                         callApi("answerCallbackQuery", {{"callback_query_id", cbId}}, cfg);
-                        editDashboard(cfg, msgId, reportForCallback(data, cfg), keyboardForView(viewForCallback(data), cfg));
+                        editDashboard(cfg, msgId, reportForCallback(data, cfg, history, levels), keyboardForView(viewForCallback(data), cfg));
                         continue;
                     }
 
@@ -958,18 +1376,17 @@ int main() {
                         if (!msg.contains("chat") || !isAuthorizedChat(msg["chat"], cfg)) continue;
                         if (!msg.contains("text")) continue;
 
-                        std::string response = handleTextCommand(msg.value("text", ""), cfg);
+                        std::string response = handleTextCommand(msg.value("text", ""), cfg, history, levels);
                         ApiResponse sent = callApi("sendMessage", {
                             {"chat_id", cfg.chatId},
                             {"parse_mode", "MarkdownV2"},
                             {"text", response},
                             {"reply_markup", keyboardForTextCommand(msg.value("text", ""), cfg)}
                         }, cfg);
+                        if (!sent.ok) {
+                            std::cerr << "sendMessage failed HTTP " << sent.httpCode << ": " << sent.body << "\n";
+                        }
 
-                        try {
-                            json parsed = json::parse(sent.body);
-                            dashboardMessageId = parsed["result"].value("message_id", dashboardMessageId);
-                        } catch (...) {}
                     }
                 }
             }
@@ -980,22 +1397,25 @@ int main() {
         auto now = std::chrono::steady_clock::now();
         if (cfg.autoRefreshSec > 0 &&
             now - lastRefreshAt >= std::chrono::seconds(cfg.autoRefreshSec)) {
-            editDashboard(cfg, dashboardMessageId, formatTelemetry(cfg), mainKeyboardJson(cfg));
-            lastRefreshAt = now;
-        }
+            DashboardData data = buildDashboardData(cfg, levels);
+            sendLevelAlerts(cfg, levels, data.levels, data.telemetry, data.diskUsage, data.failedServiceCount);
+            levels = data.levels;
+            saveLevelsState(levelsStatePath, levels);
 
-        if (cfg.alertIntervalSec > 0 &&
-            now - lastAlertAt >= std::chrono::seconds(cfg.alertIntervalSec)) {
-            std::string alert = buildAlertText(cfg);
-            if (!alert.empty()) {
-                sendMessage(cfg, alert);
-                lastAlertAt = now;
+            appendHistory(history, {std::time(nullptr), data.telemetry.temp, data.telemetry.load[0], data.telemetry.ramPercent, data.diskUsage, healthScore(data.levels)}, cfg.historySize);
+            saveHistoryState(historyStatePath, history);
+
+            if (!editDashboard(cfg, dashboardMessageId, data.text, mainKeyboardJson(cfg))) {
+                dashboardMessageId = sendDashboard(cfg, data.text);
+                if (dashboardMessageId > 0) saveMessageIdState(dashboardStatePath, dashboardMessageId);
             }
+            lastRefreshAt = now;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     curl_global_cleanup();
+    close(instanceLockFd);
     return 0;
 }

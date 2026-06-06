@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="900" viewBox="0 0 720 900" role="img" aria-labelledby="title desc">
+  <title id="title">System Monitor Bot services screen</title>
+  <desc id="desc">Telegram dark-mode preview of the services report with restart buttons and pagination.</desc>
+  <rect width="720" height="900" fill="#11151b"/>
+  <rect x="58" y="4" width="594" height="432" rx="18" fill="#232932"/>
+  <rect x="73" y="18" width="566" height="404" rx="5" fill="#05070a"/>
+  <rect x="73" y="18" width="566" height="24" rx="5" fill="#374151"/>
+  <text x="86" y="36" fill="#7f8da3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="700">cpp</text>
+  <rect x="618" y="25" width="9" height="12" rx="2" fill="#6b778b"/>
+  <rect x="622" y="28" width="9" height="12" rx="2" fill="#8390a3"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">
+    <text x="86" y="66" fill="#8ca0bb">systemd report<tspan fill="#ff6570">:</tspan></text>
+    <text x="86" y="110" fill="#8ca0bb">UNIT</text>
+    <text x="444" y="110" fill="#8ca0bb">STATUS</text>
+    <text x="526" y="110" fill="#8ca0bb">MEM</text>
+
+    <g fill="#8ca0bb">
+      <text x="86" y="154">bot-</text>
+      <text x="86" y="176">bot-</text>
+      <text x="86" y="198">bot-</text>
+      <text x="86" y="220">bot-</text>
+      <text x="86" y="242">bot-</text>
+      <text x="86" y="264">bot-</text>
+      <text x="86" y="286">bot-</text>
+      <text x="86" y="308">bot-</text>
+      <text x="86" y="330">bot-</text>
+      <text x="86" y="352">bot-</text>
+    </g>
+
+    <g opacity="0.75">
+      <rect x="128" y="140" width="270" height="18" fill="#303946"/>
+      <rect x="128" y="162" width="250" height="18" fill="#303946"/>
+      <rect x="128" y="184" width="202" height="18" fill="#303946"/>
+      <rect x="128" y="206" width="180" height="18" fill="#303946"/>
+      <rect x="128" y="228" width="246" height="18" fill="#303946"/>
+      <rect x="128" y="250" width="220" height="18" fill="#303946"/>
+      <rect x="128" y="272" width="306" height="18" fill="#303946"/>
+      <rect x="128" y="294" width="188" height="18" fill="#303946"/>
+      <rect x="128" y="316" width="210" height="18" fill="#303946"/>
+      <rect x="128" y="338" width="170" height="18" fill="#303946"/>
+      <rect x="180" y="140" width="34" height="238" fill="#1c222b" opacity="0.9"/>
+      <rect x="250" y="140" width="28" height="238" fill="#1c222b" opacity="0.9"/>
+      <rect x="342" y="140" width="22" height="238" fill="#1c222b" opacity="0.9"/>
+    </g>
+
+    <g fill="#ff6570">
+      <text x="448" y="154">[OK]</text>
+      <text x="448" y="176">[OK]</text>
+      <text x="448" y="198">[OK]</text>
+      <text x="448" y="220">[OK]</text>
+      <text x="448" y="242">[OK]</text>
+      <text x="448" y="264">[OK]</text>
+      <text x="448" y="286">[OK]</text>
+      <text x="448" y="308">[OK]</text>
+      <text x="448" y="330">[OK]</text>
+      <text x="448" y="352">[OK]</text>
+      <text x="526" y="154">0.1M</text>
+      <text x="526" y="176">0.1M</text>
+      <text x="526" y="198">0.1M</text>
+      <text x="526" y="220">0.1M</text>
+      <text x="526" y="242">0.1M</text>
+      <text x="526" y="264">0.1M</text>
+      <text x="526" y="286">0.1M</text>
+      <text x="526" y="308">0.1M</text>
+      <text x="526" y="330">0.1M</text>
+      <text x="526" y="352">0.1M</text>
+    </g>
+
+    <text x="86" y="396" fill="#8ca0bb">Units<tspan fill="#ff6570">: 10</tspan>  Active<tspan fill="#ff6570">: 10</tspan>  Failed<tspan fill="#ff6570">: 0</tspan></text>
+  </g>
+
+  <text x="600" y="424" fill="#8a929f" font-family="Arial, sans-serif" font-size="16" font-weight="700">23:16</text>
+
+  <g font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#f4f6fb">
+    <rect x="58" y="438" width="594" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="488" width="594" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="538" width="594" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="588" width="594" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="638" width="594" height="46" rx="8" fill="#242a33"/>
+
+    <text x="206" y="466">Restart</text>
+    <text x="206" y="516">Restart</text>
+    <text x="206" y="566">Restart</text>
+    <text x="258" y="616">Restart</text>
+    <text x="258" y="666">Restart</text>
+    <g opacity="0.8">
+      <rect x="270" y="452" width="210" height="16" fill="#a7adb6"/>
+      <rect x="270" y="502" width="174" height="16" fill="#a7adb6"/>
+      <rect x="270" y="552" width="218" height="16" fill="#a7adb6"/>
+      <rect x="312" y="602" width="150" height="16" fill="#a7adb6"/>
+      <rect x="312" y="652" width="170" height="16" fill="#a7adb6"/>
+    </g>
+
+    <rect x="58" y="688" width="195" height="46" rx="8" fill="#242a33"/>
+    <rect x="257" y="688" width="196" height="46" rx="8" fill="#242a33"/>
+    <rect x="457" y="688" width="195" height="46" rx="8" fill="#242a33"/>
+    <text x="154" y="715">&lt;</text>
+    <text x="324" y="715">Page 1/2</text>
+    <text x="548" y="715">&gt;</text>
+
+    <rect x="58" y="738" width="296" height="46" rx="8" fill="#242a33"/>
+    <rect x="358" y="738" width="294" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="788" width="296" height="46" rx="8" fill="#242a33"/>
+    <rect x="358" y="788" width="294" height="46" rx="8" fill="#242a33"/>
+    <rect x="58" y="838" width="594" height="46" rx="8" fill="#242a33"/>
+    <text x="170" y="765">Обновить</text>
+    <text x="476" y="765">STATUS</text>
+    <text x="220" y="815">DISK</text>
+    <text x="498" y="815">NET</text>
+    <text x="322" y="865">HISTORY</text>
+  </g>
+
+  <circle cx="26" cy="856" r="20" fill="#07120b" stroke="#3b8a47"/>
+  <text x="19" y="861" fill="#4bc863" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">▣</text>
+</svg>

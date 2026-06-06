@@ -44,6 +44,13 @@
 
 Текстовые команды отправляют новый отчет в чат. Это удобно, если нужно заново создать панель командой `/start`.
 
+## Скриншоты UI
+
+<p>
+  <img src="assets/screenshots/dashboard.svg" alt="Live dashboard с телеметрией и inline-кнопками" width="420">
+  <img src="assets/screenshots/services.svg" alt="Экран SERVICES со статусами systemd-сервисов и restart-кнопками" width="360">
+</p>
+
 Пример системного статуса:
 
 ```text

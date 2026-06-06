@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="620" viewBox="0 0 820 620" role="img" aria-labelledby="title desc">
+  <title id="title">System Monitor Bot dashboard screen</title>
+  <desc id="desc">Telegram dark-mode preview of the live system dashboard with inline buttons.</desc>
+  <rect width="820" height="620" fill="#11151b"/>
+  <rect x="58" y="16" width="704" height="352" rx="8" fill="#232932"/>
+  <rect x="80" y="18" width="668" height="318" rx="5" fill="#05070a"/>
+  <rect x="80" y="18" width="668" height="24" rx="5" fill="#374151"/>
+  <text x="94" y="35" fill="#7f8da3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="700">cpp</text>
+  <rect x="728" y="25" width="10" height="12" rx="2" fill="#6b778b"/>
+  <rect x="732" y="28" width="10" height="12" rx="2" fill="#8390a3"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">
+    <text x="94" y="64" fill="#8ca0bb">System RPi Server Report<tspan fill="#ff6570">:</tspan></text>
+
+    <text x="94" y="108" fill="#8ca0bb">TEMP</text>
+    <text x="216" y="108" fill="#ff6570">&gt; 40.9 °C</text>
+    <text x="94" y="130" fill="#8ca0bb">LOAD</text>
+    <text x="216" y="130" fill="#ff6570">&gt; 0.5 / 0.7 / 0.6</text>
+    <text x="94" y="152" fill="#8ca0bb">RAM</text>
+    <text x="216" y="152" fill="#ff6570">&gt; [</text>
+    <text x="252" y="152" fill="#8ca0bb">■·········</text>
+    <text x="356" y="152" fill="#ff6570">] 27%</text>
+    <text x="94" y="174" fill="#8ca0bb">SWAP</text>
+    <text x="216" y="174" fill="#ff6570">&gt; [</text>
+    <text x="252" y="174" fill="#8ca0bb">··········</text>
+    <text x="356" y="174" fill="#ff6570">] 0%</text>
+    <text x="94" y="196" fill="#8ca0bb">CPU</text>
+    <text x="216" y="196" fill="#ff6570">&gt; 1800 MHz</text>
+    <text x="94" y="218" fill="#8ca0bb">IP</text>
+    <text x="216" y="218" fill="#ff6570">&gt; </text>
+    <rect x="236" y="204" width="126" height="18" fill="#3a2024" opacity="0.85"/>
+    <rect x="278" y="204" width="88" height="18" fill="#222b36" opacity="0.8"/>
+    <text x="94" y="240" fill="#8ca0bb">THROTTLED</text>
+    <text x="216" y="240" fill="#ff6570">&gt; 0x0</text>
+    <text x="94" y="262" fill="#8ca0bb">UPTIME</text>
+    <text x="216" y="262" fill="#ff6570">&gt; 81H 53M</text>
+
+    <text x="94" y="306" fill="#8ca0bb">HEALTH</text>
+    <text x="166" y="306" fill="#ff6570">&gt; 100/100</text>
+    <text x="94" y="328" fill="#8ca0bb">Status<tspan fill="#ff6570">:</tspan> Temp OK<tspan fill="#ff6570">,</tspan> Load OK<tspan fill="#ff6570">,</tspan> RAM OK<tspan fill="#ff6570">,</tspan> Disk <tspan fill="#ff6570">7%</tspan> OK<tspan fill="#ff6570">,</tspan> Services OK</text>
+  </g>
+
+  <text x="708" y="358" fill="#8a929f" font-family="Arial, sans-serif" font-size="16" font-weight="700">23:16</text>
+
+  <g font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#f4f6fb">
+    <rect x="66" y="370" width="346" height="46" rx="8" fill="#242a33"/>
+    <rect x="416" y="370" width="346" height="46" rx="8" fill="#242a33"/>
+    <rect x="66" y="420" width="346" height="46" rx="8" fill="#242a33"/>
+    <rect x="416" y="420" width="346" height="46" rx="8" fill="#242a33"/>
+    <rect x="66" y="470" width="696" height="46" rx="8" fill="#242a33"/>
+    <rect x="66" y="520" width="696" height="46" rx="16" fill="#242a33"/>
+    <text x="202" y="398">Обновить</text>
+    <text x="550" y="398">SERVICES</text>
+    <text x="220" y="447">DISK</text>
+    <text x="570" y="447">NET</text>
+    <text x="380" y="498">HISTORY</text>
+    <text x="384" y="548">POWER</text>
+  </g>
+
+  <circle cx="32" cy="545" r="20" fill="#07120b" stroke="#3b8a47"/>
+  <text x="25" y="550" fill="#4bc863" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">▣</text>
+</svg>

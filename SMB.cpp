@@ -55,6 +55,7 @@ struct Config {
     int historySize = 120;
     int pollTimeoutSec = 20;
     int autoRefreshSec = 30;
+    int alarmTtlSec = 30;
     bool allowServiceControl = false;
     bool allowPowerControl = false;
     std::string selfUnit;
@@ -117,6 +118,17 @@ struct DiskInfo {
     double usedGb = 0.0;
     double freeGb = 0.0;
     bool ok = false;
+};
+
+struct ServiceInfo {
+    std::string unit;
+    std::string active;
+    std::string memory;
+};
+
+struct PendingAlarm {
+    int messageId = 0;
+    std::chrono::steady_clock::time_point deleteAt;
 };
 
 size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -235,6 +247,8 @@ Config loadConfig() {
     cfg.historySize = std::max(10, std::min(500, cfg.historySize));
     cfg.pollTimeoutSec = envInt("POLL_TIMEOUT_SEC", cfg.pollTimeoutSec);
     cfg.autoRefreshSec = envInt("AUTO_REFRESH_SEC", cfg.autoRefreshSec);
+    cfg.alarmTtlSec = envInt("ALARM_TTL_SEC", cfg.alarmTtlSec);
+    cfg.alarmTtlSec = std::max(1, std::min(300, cfg.alarmTtlSec));
     cfg.allowServiceControl = envBool("BOT_ALLOW_SERVICE_CONTROL");
     cfg.allowPowerControl = envBool("BOT_ALLOW_POWER_CONTROL");
     const char* selfUnitEnv = std::getenv("BOT_SELF_UNIT");
@@ -348,7 +362,7 @@ ApiResponse callApi(
     return result;
 }
 
-ApiResponse getUpdates(int offset, const Config& cfg) {
+ApiResponse getUpdates(int offset, const Config& cfg, int timeoutSec) {
     ApiResponse result;
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -356,14 +370,15 @@ ApiResponse getUpdates(int offset, const Config& cfg) {
         return result;
     }
 
+    timeoutSec = std::max(1, timeoutSec);
     std::string url = "https://api.telegram.org/bot" + cfg.token + "/getUpdates";
     url += "?offset=" + std::to_string(offset);
-    url += "&timeout=" + std::to_string(cfg.pollTimeoutSec);
+    url += "&timeout=" + std::to_string(timeoutSec);
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result.body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, cfg.pollTimeoutSec + 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSec + 10L);
 
     CURLcode rc = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.httpCode);
@@ -378,6 +393,10 @@ ApiResponse getUpdates(int offset, const Config& cfg) {
         std::cerr << "getUpdates HTTP " << result.httpCode << ": " << result.body << "\n";
     }
     return result;
+}
+
+ApiResponse getUpdates(int offset, const Config& cfg) {
+    return getUpdates(offset, cfg, cfg.pollTimeoutSec);
 }
 
 std::string mainKeyboardJson(const Config& cfg) {
@@ -691,19 +710,7 @@ std::string formatNetReport() {
 }
 
 bool isSafeBotUnit(const std::string& unit);
-
-std::vector<std::string> botUnits() {
-    std::string raw = exec("systemctl list-units --type=service --all --no-legend | awk '$1 ~ /^bot-/ {print $1}'");
-    std::vector<std::string> units;
-    std::istringstream iss(raw);
-    std::string svc;
-    while (std::getline(iss, svc)) {
-        svc = trim(svc);
-        if (!svc.empty() && isSafeBotUnit(svc)) units.push_back(svc);
-    }
-    std::sort(units.begin(), units.end());
-    return units;
-}
+double parseServiceMemoryMb(const std::string& memoryValue, bool fromPsFallback);
 
 bool isSafeBotUnit(const std::string& unit) {
     if (unit.rfind("bot-", 0) != 0) return false;
@@ -711,6 +718,92 @@ bool isSafeBotUnit(const std::string& unit) {
     return std::all_of(unit.begin(), unit.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '@';
     });
+}
+
+std::vector<ServiceInfo> collectServiceInfos(bool includeMemory) {
+    std::string raw = exec(
+        "systemctl list-units --type=service --all --no-legend --plain 2>/dev/null | awk '$1 ~ /^bot-/ {print $1 \"|\" $3}'",
+        2,
+        0
+    );
+
+    std::vector<ServiceInfo> services;
+    std::istringstream iss(raw);
+    std::string line;
+    while (std::getline(iss, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+
+        std::size_t delimiter = line.find('|');
+        std::string unit = delimiter == std::string::npos ? line : line.substr(0, delimiter);
+        std::string active = delimiter == std::string::npos ? "unknown" : line.substr(delimiter + 1);
+        unit = trim(unit);
+        active = trim(active);
+        if (active.empty()) active = "unknown";
+        if (isSafeBotUnit(unit)) services.push_back({unit, active, "N/A"});
+    }
+
+    std::sort(services.begin(), services.end(), [](const ServiceInfo& a, const ServiceInfo& b) {
+        return a.unit < b.unit;
+    });
+
+    if (!includeMemory) return services;
+
+    std::ostringstream memCmd;
+    bool hasActiveServices = false;
+    memCmd << "for u in";
+    for (const ServiceInfo& service : services) {
+        if (service.active != "active") continue;
+        hasActiveServices = true;
+        memCmd << " '" << shellEscapeSingleQuotes(service.unit) << "'";
+    }
+    memCmd << "; do m=$(systemctl show \"$u\" -p MemoryCurrent --value 2>/dev/null); printf '%s|%s\\n' \"$u\" \"$m\"; done";
+
+    if (!hasActiveServices) return services;
+
+    std::string memRaw = exec(memCmd.str(), 2, 0);
+    std::istringstream memStream(memRaw);
+    std::string memLine;
+    while (std::getline(memStream, memLine)) {
+        std::size_t delimiter = memLine.find('|');
+        if (delimiter == std::string::npos) continue;
+
+        std::string unit = trim(memLine.substr(0, delimiter));
+        std::string memStr = trim(memLine.substr(delimiter + 1));
+        if (memStr.empty() || memStr == "0" || memStr == "[not set]") continue;
+
+        for (ServiceInfo& service : services) {
+            if (service.unit != unit) continue;
+            try {
+                double mb = parseServiceMemoryMb(memStr, false);
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(1) << mb << "M";
+                service.memory = oss.str();
+            } catch (...) {
+                service.memory = "N/A";
+            }
+            break;
+        }
+    }
+
+    return services;
+}
+
+std::vector<std::string> botUnits() {
+    std::vector<std::string> units;
+    for (const ServiceInfo& service : collectServiceInfos(false)) {
+        units.push_back(service.unit);
+    }
+    return units;
+}
+
+std::vector<std::string> serviceUnitNames(const std::vector<ServiceInfo>& services) {
+    std::vector<std::string> units;
+    units.reserve(services.size());
+    for (const ServiceInfo& service : services) {
+        units.push_back(service.unit);
+    }
+    return units;
 }
 
 std::string shortUnitName(const std::string& unit) {
@@ -742,49 +835,26 @@ double parseServiceMemoryMb(const std::string& memoryValue, bool fromPsFallback)
     return std::max(0.1, mb);
 }
 
-std::string serviceMemory(const std::string& unit) {
-    std::string memStr = exec(("systemctl show " + unit + " -p MemoryCurrent --value").c_str());
-    bool fromPsFallback = false;
-
-    if (memStr == "0" || memStr == "[not set]" || memStr.empty()) {
-        std::string procName = unit.substr(0, unit.size() - 8);
-        std::string psCmd = "ps -C " + procName + " -o rss --no-headers | awk '{sum+=$1} END {print sum}'";
-        memStr = exec(psCmd.c_str());
-        fromPsFallback = true;
-    }
-
-    try {
-        double mb = parseServiceMemoryMb(memStr, fromPsFallback);
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(1) << mb << "M";
-        return oss.str();
-    } catch (...) {
-        return "N/A";
-    }
-}
-
-std::string formatServicesReport() {
-    std::vector<std::string> units = botUnits();
+std::string formatServicesReport(const std::vector<ServiceInfo>& services) {
     std::ostringstream oss;
     oss << "systemd report:\n\n";
 
     std::size_t unitWidth = 35;
-    for (const auto& unit : units) {
-        unitWidth = std::max(unitWidth, unit.size() + 2);
+    for (const ServiceInfo& service : services) {
+        unitWidth = std::max(unitWidth, service.unit.size() + 2);
     }
 
     oss << std::left << std::setw(static_cast<int>(unitWidth)) << "UNIT" << std::setw(8) << "STATUS" << "MEM\n\n";
 
     int activeCount = 0;
     int failedCount = 0;
-    for (const auto& unit : units) {
-        std::string active = exec(("systemctl is-active " + unit).c_str());
-        oss << std::left << std::setw(static_cast<int>(unitWidth)) << unit;
+    for (const ServiceInfo& service : services) {
+        oss << std::left << std::setw(static_cast<int>(unitWidth)) << service.unit;
 
-        if (active == "active") {
+        if (service.active == "active") {
             ++activeCount;
-            oss << std::setw(8) << "[OK]" << serviceMemory(unit) << "\n";
-        } else if (active == "failed") {
+            oss << std::setw(8) << "[OK]" << service.memory << "\n";
+        } else if (service.active == "failed") {
             ++failedCount;
             oss << std::setw(8) << "[FAIL]" << "\n";
         } else {
@@ -792,12 +862,15 @@ std::string formatServicesReport() {
         }
     }
 
-    oss << "\nUnits: " << units.size() << "  Active: " << activeCount << "  Failed: " << failedCount << "\n";
+    oss << "\nUnits: " << services.size() << "  Active: " << activeCount << "  Failed: " << failedCount << "\n";
     return codeBlock(oss.str());
 }
 
-std::string servicesKeyboardJson(std::size_t page) {
-    std::vector<std::string> units = botUnits();
+std::string formatServicesReport() {
+    return formatServicesReport(collectServiceInfos(true));
+}
+
+std::string servicesKeyboardJson(std::size_t page, const std::vector<std::string>& units) {
     json rows = json::array();
 
     std::size_t totalPages = std::max<std::size_t>(1, (units.size() + SERVICES_PER_PAGE - 1) / SERVICES_PER_PAGE);
@@ -842,6 +915,10 @@ std::string servicesKeyboardJson(std::size_t page) {
 
     json keyboard = {{"inline_keyboard", rows}};
     return keyboard.dump();
+}
+
+std::string servicesKeyboardJson(std::size_t page) {
+    return servicesKeyboardJson(page, botUnits());
 }
 
 std::string powerKeyboardJson() {
@@ -957,9 +1034,9 @@ std::string runPowerAction(const std::string& action, const Config& cfg) {
 
 std::vector<std::string> failedBotUnits() {
     std::vector<std::string> failed;
-    for (const auto& unit : botUnits()) {
-        if (exec(("systemctl is-active " + unit).c_str()) == "failed") {
-            failed.push_back(unit);
+    for (const ServiceInfo& service : collectServiceInfos(false)) {
+        if (service.active == "failed") {
+            failed.push_back(service.unit);
         }
     }
     return failed;
@@ -1097,53 +1174,6 @@ std::string formatHistoryReport(const std::deque<HealthSnapshot>& history) {
     return codeBlock(oss.str());
 }
 
-std::string levelTransitionMessage(
-    const std::string& name,
-    Severity previous,
-    Severity current,
-    double value
-) {
-    if (previous == current) return "";
-    std::ostringstream oss;
-    oss << name << ": " << severityText(previous) << " -> " << severityText(current)
-        << " (" << std::fixed << std::setprecision(1) << value << ")";
-    return oss.str();
-}
-
-void sendLevelAlerts(
-    const Config& cfg,
-    const TelemetryLevels& previous,
-    const TelemetryLevels& current,
-    const Telemetry& telemetry,
-    double diskUsage,
-    int failedServiceCount
-) {
-    std::vector<std::string> changes;
-    auto pushIfChanged = [&](const std::string& line) {
-        if (!line.empty()) changes.push_back(line);
-    };
-    pushIfChanged(levelTransitionMessage("Temp", previous.temp, current.temp, telemetry.temp));
-    pushIfChanged(levelTransitionMessage("Load", previous.load, current.load, telemetry.load[0]));
-    pushIfChanged(levelTransitionMessage("RAM", previous.ram, current.ram, telemetry.ramPercent));
-    pushIfChanged(levelTransitionMessage("Disk", previous.disk, current.disk, diskUsage));
-    if (previous.services != current.services) {
-        std::ostringstream oss;
-        oss << "Services: " << severityText(previous.services) << " -> " << severityText(current.services)
-            << " (" << failedServiceCount << " failed)";
-        changes.push_back(oss.str());
-    }
-    if (changes.empty()) return;
-
-    std::ostringstream text;
-    text << "Alert state changed\n\n";
-    for (const auto& line : changes) text << line << "\n";
-    callApi("sendMessage", {
-        {"chat_id", cfg.chatId},
-        {"parse_mode", "MarkdownV2"},
-        {"text", codeBlock(text.str())}
-    }, cfg);
-}
-
 int sendDashboard(const Config& cfg, const std::string& dashboardText) {
     ApiResponse response = callApi("sendMessage", {
         {"chat_id", cfg.chatId},
@@ -1171,6 +1201,112 @@ bool editDashboard(const Config& cfg, int messageId, const std::string& text, co
     }, cfg);
     if (response.ok) return true;
     return response.body.find("message is not modified") != std::string::npos;
+}
+
+int sendTemporaryAlarmMessage(const Config& cfg, const std::string& text) {
+    ApiResponse response = callApi("sendMessage", {
+        {"chat_id", cfg.chatId},
+        {"parse_mode", "MarkdownV2"},
+        {"text", codeBlock(text)}
+    }, cfg);
+
+    try {
+        json parsed = json::parse(response.body);
+        return parsed["result"].value("message_id", 0);
+    } catch (...) {
+        return 0;
+    }
+}
+
+bool deleteMessage(const Config& cfg, int messageId) {
+    if (messageId <= 0) return false;
+    ApiResponse response = callApi("deleteMessage", {
+        {"chat_id", cfg.chatId},
+        {"message_id", std::to_string(messageId)}
+    }, cfg);
+    return response.ok;
+}
+
+std::string levelTransitionMessage(
+    const std::string& name,
+    Severity previous,
+    Severity current,
+    double value
+) {
+    if (previous == current) return "";
+    std::ostringstream oss;
+    oss << name << ": " << severityText(previous) << " -> " << severityText(current)
+        << " (" << std::fixed << std::setprecision(1) << value << ")";
+    return oss.str();
+}
+
+int sendLevelAlarm(
+    const Config& cfg,
+    const TelemetryLevels& previous,
+    const TelemetryLevels& current,
+    const Telemetry& telemetry,
+    double diskUsage,
+    int failedServiceCount
+) {
+    std::vector<std::string> changes;
+    auto pushIfChanged = [&](const std::string& line) {
+        if (!line.empty()) changes.push_back(line);
+    };
+
+    pushIfChanged(levelTransitionMessage("Temp", previous.temp, current.temp, telemetry.temp));
+    pushIfChanged(levelTransitionMessage("Load", previous.load, current.load, telemetry.load[0]));
+    pushIfChanged(levelTransitionMessage("RAM", previous.ram, current.ram, telemetry.ramPercent));
+    pushIfChanged(levelTransitionMessage("Disk", previous.disk, current.disk, diskUsage));
+    if (previous.services != current.services) {
+        std::ostringstream oss;
+        oss << "Services: " << severityText(previous.services) << " -> " << severityText(current.services)
+            << " (" << failedServiceCount << " failed)";
+        changes.push_back(oss.str());
+    }
+    if (changes.empty()) return 0;
+
+    std::ostringstream text;
+    text << "ALARM\n";
+    text << "Auto-delete in " << cfg.alarmTtlSec << " sec\n\n";
+    for (const auto& line : changes) text << line << "\n";
+    return sendTemporaryAlarmMessage(cfg, text.str());
+}
+
+void queueTemporaryAlarm(std::vector<PendingAlarm>& pendingAlarms, int messageId, const Config& cfg) {
+    if (messageId <= 0) return;
+    pendingAlarms.push_back({
+        messageId,
+        std::chrono::steady_clock::now() + std::chrono::seconds(cfg.alarmTtlSec)
+    });
+}
+
+void deleteExpiredTemporaryAlarms(std::vector<PendingAlarm>& pendingAlarms, const Config& cfg) {
+    auto now = std::chrono::steady_clock::now();
+    auto it = pendingAlarms.begin();
+    while (it != pendingAlarms.end()) {
+        if (now >= it->deleteAt) {
+            deleteMessage(cfg, it->messageId);
+            it = pendingAlarms.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+int pollTimeoutForTemporaryAlarms(const std::vector<PendingAlarm>& pendingAlarms, const Config& cfg) {
+    int timeoutSec = std::max(1, cfg.pollTimeoutSec);
+    if (pendingAlarms.empty()) return timeoutSec;
+
+    auto now = std::chrono::steady_clock::now();
+    auto nextDelete = pendingAlarms.front().deleteAt;
+    for (const PendingAlarm& alarm : pendingAlarms) {
+        nextDelete = std::min(nextDelete, alarm.deleteAt);
+    }
+
+    if (nextDelete <= now) return 1;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(nextDelete - now).count();
+    int secondsUntilDelete = static_cast<int>((ms + 999) / 1000);
+    return std::max(1, std::min(timeoutSec, secondsUntilDelete));
 }
 
 std::string reportForCallback(
@@ -1336,9 +1472,17 @@ int main() {
         if (dashboardMessageId > 0) saveMessageIdState(dashboardStatePath, dashboardMessageId);
     }
     auto lastRefreshAt = std::chrono::steady_clock::now();
+    std::string currentView = "status";
+    std::vector<PendingAlarm> pendingAlarms;
 
     while (running) {
-        ApiResponse updates = getUpdates(lastUpdateId + 1, cfg);
+        deleteExpiredTemporaryAlarms(pendingAlarms, cfg);
+        ApiResponse updates = getUpdates(
+            lastUpdateId + 1,
+            cfg,
+            pollTimeoutForTemporaryAlarms(pendingAlarms, cfg)
+        );
+        deleteExpiredTemporaryAlarms(pendingAlarms, cfg);
         if (!updates.ok || updates.body.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
@@ -1366,8 +1510,27 @@ int main() {
                         }
 
                         int msgId = cb["message"].value("message_id", 0);
+                        std::string nextView = viewForCallback(data);
                         callApi("answerCallbackQuery", {{"callback_query_id", cbId}}, cfg);
-                        editDashboard(cfg, msgId, reportForCallback(data, cfg, history, levels), keyboardForView(viewForCallback(data), cfg));
+
+                        std::string response;
+                        std::string replyMarkup;
+                        if (data == "services" || data.rfind("services:", 0) == 0) {
+                            std::vector<ServiceInfo> services = collectServiceInfos(true);
+                            response = formatServicesReport(services);
+                            replyMarkup = cfg.allowServiceControl
+                                ? servicesKeyboardJson(servicesPageFromView(nextView), serviceUnitNames(services))
+                                : mainKeyboardJson(cfg);
+                        } else {
+                            response = reportForCallback(data, cfg, history, levels);
+                            replyMarkup = keyboardForView(nextView, cfg);
+                        }
+
+                        if (editDashboard(cfg, msgId, response, replyMarkup)) {
+                            dashboardMessageId = msgId;
+                            currentView = nextView;
+                            saveMessageIdState(dashboardStatePath, dashboardMessageId);
+                        }
                         continue;
                     }
 
@@ -1397,22 +1560,47 @@ int main() {
         auto now = std::chrono::steady_clock::now();
         if (cfg.autoRefreshSec > 0 &&
             now - lastRefreshAt >= std::chrono::seconds(cfg.autoRefreshSec)) {
-            DashboardData data = buildDashboardData(cfg, levels);
-            sendLevelAlerts(cfg, levels, data.levels, data.telemetry, data.diskUsage, data.failedServiceCount);
+            TelemetryLevels previousLevels = levels;
+            DashboardData data = buildDashboardData(cfg, previousLevels);
+            queueTemporaryAlarm(
+                pendingAlarms,
+                sendLevelAlarm(cfg, previousLevels, data.levels, data.telemetry, data.diskUsage, data.failedServiceCount),
+                cfg
+            );
             levels = data.levels;
             saveLevelsState(levelsStatePath, levels);
 
             appendHistory(history, {std::time(nullptr), data.telemetry.temp, data.telemetry.load[0], data.telemetry.ramPercent, data.diskUsage, healthScore(data.levels)}, cfg.historySize);
             saveHistoryState(historyStatePath, history);
 
-            if (!editDashboard(cfg, dashboardMessageId, data.text, mainKeyboardJson(cfg))) {
+            std::string refreshText = data.text;
+            std::string refreshKeyboard = mainKeyboardJson(cfg);
+            if (currentView != "status") {
+                if (currentView == "services" || currentView.rfind("services:", 0) == 0) {
+                    std::vector<ServiceInfo> services = collectServiceInfos(true);
+                    refreshText = formatServicesReport(services);
+                    refreshKeyboard = cfg.allowServiceControl
+                        ? servicesKeyboardJson(servicesPageFromView(currentView), serviceUnitNames(services))
+                        : mainKeyboardJson(cfg);
+                } else {
+                    refreshText = reportForCallback(currentView, cfg, history, levels);
+                    refreshKeyboard = keyboardForView(currentView, cfg);
+                }
+            }
+
+            if (!editDashboard(cfg, dashboardMessageId, refreshText, refreshKeyboard)) {
                 dashboardMessageId = sendDashboard(cfg, data.text);
                 if (dashboardMessageId > 0) saveMessageIdState(dashboardStatePath, dashboardMessageId);
+                currentView = "status";
             }
             lastRefreshAt = now;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    for (const PendingAlarm& alarm : pendingAlarms) {
+        deleteMessage(cfg, alarm.messageId);
     }
 
     curl_global_cleanup();

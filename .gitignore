@@ -1,2 +1,14 @@
-.Ds_Store
+.DS_Store
+*.o
+*.obj
+*.out
+*.log
+
+# Local environment files
+.env
+.env.*
+
+# Build outputs
 system_monitor_bot
+build/
+cmake-build-*/

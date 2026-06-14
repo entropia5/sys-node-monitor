@@ -55,7 +55,6 @@ struct Config {
     int historySize = 120;
     int pollTimeoutSec = 20;
     int autoRefreshSec = 30;
-    int alarmTtlSec = 30;
     bool allowServiceControl = false;
     bool allowPowerControl = false;
     std::string selfUnit;
@@ -124,11 +123,6 @@ struct ServiceInfo {
     std::string unit;
     std::string active;
     std::string memory;
-};
-
-struct PendingAlarm {
-    int messageId = 0;
-    std::chrono::steady_clock::time_point deleteAt;
 };
 
 size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -247,8 +241,6 @@ Config loadConfig() {
     cfg.historySize = std::max(10, std::min(500, cfg.historySize));
     cfg.pollTimeoutSec = envInt("POLL_TIMEOUT_SEC", cfg.pollTimeoutSec);
     cfg.autoRefreshSec = envInt("AUTO_REFRESH_SEC", cfg.autoRefreshSec);
-    cfg.alarmTtlSec = envInt("ALARM_TTL_SEC", cfg.alarmTtlSec);
-    cfg.alarmTtlSec = std::max(1, std::min(300, cfg.alarmTtlSec));
     cfg.allowServiceControl = envBool("BOT_ALLOW_SERVICE_CONTROL");
     cfg.allowPowerControl = envBool("BOT_ALLOW_POWER_CONTROL");
     const char* selfUnitEnv = std::getenv("BOT_SELF_UNIT");
@@ -1174,12 +1166,12 @@ std::string formatHistoryReport(const std::deque<HealthSnapshot>& history) {
     return codeBlock(oss.str());
 }
 
-int sendDashboard(const Config& cfg, const std::string& dashboardText) {
+int sendDashboard(const Config& cfg, const std::string& dashboardText, const std::string& replyMarkup = "") {
     ApiResponse response = callApi("sendMessage", {
         {"chat_id", cfg.chatId},
         {"parse_mode", "MarkdownV2"},
         {"text", dashboardText},
-        {"reply_markup", mainKeyboardJson(cfg)}
+        {"reply_markup", replyMarkup.empty() ? mainKeyboardJson(cfg) : replyMarkup}
     }, cfg);
 
     try {
@@ -1203,30 +1195,6 @@ bool editDashboard(const Config& cfg, int messageId, const std::string& text, co
     return response.body.find("message is not modified") != std::string::npos;
 }
 
-int sendTemporaryAlarmMessage(const Config& cfg, const std::string& text) {
-    ApiResponse response = callApi("sendMessage", {
-        {"chat_id", cfg.chatId},
-        {"parse_mode", "MarkdownV2"},
-        {"text", codeBlock(text)}
-    }, cfg);
-
-    try {
-        json parsed = json::parse(response.body);
-        return parsed["result"].value("message_id", 0);
-    } catch (...) {
-        return 0;
-    }
-}
-
-bool deleteMessage(const Config& cfg, int messageId) {
-    if (messageId <= 0) return false;
-    ApiResponse response = callApi("deleteMessage", {
-        {"chat_id", cfg.chatId},
-        {"message_id", std::to_string(messageId)}
-    }, cfg);
-    return response.ok;
-}
-
 std::string levelTransitionMessage(
     const std::string& name,
     Severity previous,
@@ -1240,8 +1208,7 @@ std::string levelTransitionMessage(
     return oss.str();
 }
 
-int sendLevelAlarm(
-    const Config& cfg,
+std::string buildLevelAlarmText(
     const TelemetryLevels& previous,
     const TelemetryLevels& current,
     const Telemetry& telemetry,
@@ -1263,50 +1230,13 @@ int sendLevelAlarm(
             << " (" << failedServiceCount << " failed)";
         changes.push_back(oss.str());
     }
-    if (changes.empty()) return 0;
+    if (changes.empty()) return "";
 
     std::ostringstream text;
     text << "ALARM\n";
-    text << "Auto-delete in " << cfg.alarmTtlSec << " sec\n\n";
+    text << "Health level changed\n\n";
     for (const auto& line : changes) text << line << "\n";
-    return sendTemporaryAlarmMessage(cfg, text.str());
-}
-
-void queueTemporaryAlarm(std::vector<PendingAlarm>& pendingAlarms, int messageId, const Config& cfg) {
-    if (messageId <= 0) return;
-    pendingAlarms.push_back({
-        messageId,
-        std::chrono::steady_clock::now() + std::chrono::seconds(cfg.alarmTtlSec)
-    });
-}
-
-void deleteExpiredTemporaryAlarms(std::vector<PendingAlarm>& pendingAlarms, const Config& cfg) {
-    auto now = std::chrono::steady_clock::now();
-    auto it = pendingAlarms.begin();
-    while (it != pendingAlarms.end()) {
-        if (now >= it->deleteAt) {
-            deleteMessage(cfg, it->messageId);
-            it = pendingAlarms.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-int pollTimeoutForTemporaryAlarms(const std::vector<PendingAlarm>& pendingAlarms, const Config& cfg) {
-    int timeoutSec = std::max(1, cfg.pollTimeoutSec);
-    if (pendingAlarms.empty()) return timeoutSec;
-
-    auto now = std::chrono::steady_clock::now();
-    auto nextDelete = pendingAlarms.front().deleteAt;
-    for (const PendingAlarm& alarm : pendingAlarms) {
-        nextDelete = std::min(nextDelete, alarm.deleteAt);
-    }
-
-    if (nextDelete <= now) return 1;
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(nextDelete - now).count();
-    int secondsUntilDelete = static_cast<int>((ms + 999) / 1000);
-    return std::max(1, std::min(timeoutSec, secondsUntilDelete));
+    return codeBlock(text.str());
 }
 
 std::string reportForCallback(
@@ -1356,10 +1286,23 @@ std::string viewForCallback(const std::string& data) {
     return data;
 }
 
+std::string viewForTextCommand(const std::string& text) {
+    if (text == "/services") return "services";
+    if (text == "/disk") return "disk";
+    if (text == "/net") return "net";
+    if (text == "/history") return "history";
+    if (text == "/power") return "power";
+    if (text.rfind("/restart ", 0) == 0) return "services";
+    return "status";
+}
+
 std::string keyboardForTextCommand(const std::string& text, const Config& cfg) {
     if (text == "/services") return keyboardForView("services", cfg);
+    if (text == "/disk") return keyboardForView("disk", cfg);
+    if (text == "/net") return keyboardForView("net", cfg);
     if (text == "/power") return keyboardForView("power", cfg);
     if (text == "/history") return keyboardForView("history", cfg);
+    if (text.rfind("/restart ", 0) == 0) return keyboardForView("services", cfg);
     return mainKeyboardJson(cfg);
 }
 
@@ -1473,16 +1416,9 @@ int main() {
     }
     auto lastRefreshAt = std::chrono::steady_clock::now();
     std::string currentView = "status";
-    std::vector<PendingAlarm> pendingAlarms;
 
     while (running) {
-        deleteExpiredTemporaryAlarms(pendingAlarms, cfg);
-        ApiResponse updates = getUpdates(
-            lastUpdateId + 1,
-            cfg,
-            pollTimeoutForTemporaryAlarms(pendingAlarms, cfg)
-        );
-        deleteExpiredTemporaryAlarms(pendingAlarms, cfg);
+        ApiResponse updates = getUpdates(lastUpdateId + 1, cfg);
         if (!updates.ok || updates.body.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
@@ -1539,15 +1475,18 @@ int main() {
                         if (!msg.contains("chat") || !isAuthorizedChat(msg["chat"], cfg)) continue;
                         if (!msg.contains("text")) continue;
 
-                        std::string response = handleTextCommand(msg.value("text", ""), cfg, history, levels);
-                        ApiResponse sent = callApi("sendMessage", {
-                            {"chat_id", cfg.chatId},
-                            {"parse_mode", "MarkdownV2"},
-                            {"text", response},
-                            {"reply_markup", keyboardForTextCommand(msg.value("text", ""), cfg)}
-                        }, cfg);
-                        if (!sent.ok) {
-                            std::cerr << "sendMessage failed HTTP " << sent.httpCode << ": " << sent.body << "\n";
+                        std::string commandText = msg.value("text", "");
+                        std::string response = handleTextCommand(commandText, cfg, history, levels);
+                        std::string nextView = viewForTextCommand(commandText);
+                        std::string replyMarkup = keyboardForTextCommand(commandText, cfg);
+                        if (editDashboard(cfg, dashboardMessageId, response, replyMarkup)) {
+                            currentView = nextView;
+                        } else {
+                            dashboardMessageId = sendDashboard(cfg, response, replyMarkup);
+                            if (dashboardMessageId > 0) {
+                                saveMessageIdState(dashboardStatePath, dashboardMessageId);
+                                currentView = nextView;
+                            }
                         }
 
                     }
@@ -1562,10 +1501,12 @@ int main() {
             now - lastRefreshAt >= std::chrono::seconds(cfg.autoRefreshSec)) {
             TelemetryLevels previousLevels = levels;
             DashboardData data = buildDashboardData(cfg, previousLevels);
-            queueTemporaryAlarm(
-                pendingAlarms,
-                sendLevelAlarm(cfg, previousLevels, data.levels, data.telemetry, data.diskUsage, data.failedServiceCount),
-                cfg
+            std::string alarmText = buildLevelAlarmText(
+                previousLevels,
+                data.levels,
+                data.telemetry,
+                data.diskUsage,
+                data.failedServiceCount
             );
             levels = data.levels;
             saveLevelsState(levelsStatePath, levels);
@@ -1575,7 +1516,10 @@ int main() {
 
             std::string refreshText = data.text;
             std::string refreshKeyboard = mainKeyboardJson(cfg);
-            if (currentView != "status") {
+            if (!alarmText.empty()) {
+                refreshText = alarmText + "\n\n" + data.text;
+                currentView = "status";
+            } else if (currentView != "status") {
                 if (currentView == "services" || currentView.rfind("services:", 0) == 0) {
                     std::vector<ServiceInfo> services = collectServiceInfos(true);
                     refreshText = formatServicesReport(services);
@@ -1589,7 +1533,7 @@ int main() {
             }
 
             if (!editDashboard(cfg, dashboardMessageId, refreshText, refreshKeyboard)) {
-                dashboardMessageId = sendDashboard(cfg, data.text);
+                dashboardMessageId = sendDashboard(cfg, refreshText, refreshKeyboard);
                 if (dashboardMessageId > 0) saveMessageIdState(dashboardStatePath, dashboardMessageId);
                 currentView = "status";
             }
@@ -1597,10 +1541,6 @@ int main() {
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    for (const PendingAlarm& alarm : pendingAlarms) {
-        deleteMessage(cfg, alarm.messageId);
     }
 
     curl_global_cleanup();

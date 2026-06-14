@@ -10,7 +10,7 @@
 - Отчет по серверу: температура CPU в `°C`, load average, RAM, swap, частота CPU, локальный IP, throttling и uptime.
 - Информативный статус с уровнями `OK/WARN/CRIT`: температура, нагрузка, RAM, диск и состояние bot-сервисов.
 - Гистерезис уровней (`LEVEL_HYSTERESIS`) для защиты от "дребезга" на порогах.
-- Alarm-сообщения по переходам уровней `OK/WARN/CRIT` для температуры, нагрузки, RAM, диска и сервисов с автоудалением через 30 секунд.
+- Alarm-блок по переходам уровней `OK/WARN/CRIT` для температуры, нагрузки, RAM, диска и сервисов внутри редактируемого dashboard-сообщения.
 - Health score `0..100` в основном экране.
 - История замеров с кнопкой `HISTORY` и командой `/history`.
 - Отдельный красивый отчет по дискам: общий размер, занято, свободно и текстовый progress bar.
@@ -40,9 +40,9 @@
 - `HISTORY` показывает последние сохраненные замеры: время, health, temp/load/ram/disk.
 - `POWER` открывает меню перезагрузки и выключения, если включен `BOT_ALLOW_POWER_CONTROL=1`.
 
-Дальше процесс постоянно опрашивает Telegram Bot API через `getUpdates`. При нажатии кнопки и при автообновлении бот редактирует уже существующее сообщение через `editMessageText`, поэтому чат не засоряется повторяющимися отчетами. При смене уровня состояния бот отправляет короткое `ALARM`-сообщение и удаляет его через `ALARM_TTL_SEC` секунд.
+Дальше процесс постоянно опрашивает Telegram Bot API через `getUpdates`. При нажатии кнопки, текстовой команде и при автообновлении бот редактирует уже существующее сообщение через `editMessageText`, поэтому чат не засоряется повторяющимися отчетами. При смене уровня состояния бот показывает короткий `ALARM`-блок сверху основного dashboard.
 
-Текстовые команды отправляют новый отчет в чат. Это удобно, если нужно заново создать панель командой `/start`.
+Новый dashboard отправляется только при первом запуске или если сохраненный `message_id` больше нельзя отредактировать.
 
 ## Скриншоты UI
 
@@ -259,7 +259,6 @@ entropia ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 | `HISTORY_SIZE` | Размер истории замеров, по умолчанию `120` (ограничено `10..500`) |
 | `POLL_TIMEOUT_SEC` | Таймаут long polling Telegram, по умолчанию `20` |
 | `AUTO_REFRESH_SEC` | Автообновление dashboard-сообщения, по умолчанию `30` |
-| `ALARM_TTL_SEC` | Через сколько секунд удалять alarm-сообщения, по умолчанию `30` |
 | `BOT_ALLOW_SERVICE_CONTROL` | Разрешить restart `bot-*.service` командами и кнопками, по умолчанию выключено |
 | `BOT_ALLOW_POWER_CONTROL` | Показать `POWER` и разрешить reboot/poweroff через подтверждение, по умолчанию выключено |
 | `BOT_SELF_UNIT` | Имя собственного unit-файла бота для блокировки self-restart (опционально) |
@@ -287,7 +286,6 @@ Environment=DISK_CRIT=95
 Environment=LEVEL_HYSTERESIS=2
 Environment=HISTORY_SIZE=120
 Environment=AUTO_REFRESH_SEC=30
-Environment=ALARM_TTL_SEC=30
 # Environment=BOT_ALLOW_SERVICE_CONTROL=1
 # Environment=BOT_ALLOW_POWER_CONTROL=1
 # Environment=BOT_SELF_UNIT=bot-monitor.service

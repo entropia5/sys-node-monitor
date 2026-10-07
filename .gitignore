@@ -12,3 +12,7 @@
 system_monitor_bot
 build/
 cmake-build-*/
+
+data/
+*.before-*
+*.staged

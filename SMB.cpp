@@ -1,3 +1,4 @@
+#include "local_ip_addresses.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -24,6 +25,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -137,6 +139,7 @@ struct ServiceInfo {
 struct ChatBotState {
     int liveDashboardMessageId = 0;
     int lastAlertTextMessageId = 0;
+    bool photoPanel = false;
     std::string language;
 };
 
@@ -517,7 +520,7 @@ Telemetry collectTelemetry() {
         }
     }
 
-    t.localIp = exec("hostname -I | awk '{print $1}'");
+    t.localIp = localIPv4Addresses(true);
     if (t.localIp.empty()) t.localIp = "N/A";
 
     t.throttled = exec("vcgencmd get_throttled 2>/dev/null | cut -d= -f2");
@@ -715,7 +718,7 @@ std::string formatNetReport() {
     std::ostringstream oss;
     oss << "Network report:\n\n";
     oss << std::left << std::setw(12) << "HOST" << "> " << exec("hostname") << "\n";
-    oss << std::left << std::setw(12) << "IP" << "> " << exec("hostname -I") << "\n";
+    oss << std::left << std::setw(12) << "IP" << "> " << localIPv4Addresses() << "\n";
     oss << std::left << std::setw(12) << "PING 1.1.1.1" << "> " << exec("ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && echo OK || echo FAIL") << "\n\n";
     oss << "Traffic since interface start:\n\n";
     oss << std::left << std::setw(10) << "IFACE" << std::setw(14) << "RX IN" << "TX OUT\n\n";
@@ -1123,6 +1126,7 @@ BotState loadBotState(const std::string& path) {
             ChatBotState chat;
             chat.liveDashboardMessageId = value.value("live_dashboard_message_id", 0);
             chat.lastAlertTextMessageId = value.value("last_alert_text_message_id", 0);
+            chat.photoPanel = value.value("photo_panel", false);
             chat.language = value.value("language", "");
             state.chats[chatId] = chat;
         }
@@ -1137,7 +1141,8 @@ json botStateToJson(const BotState& state) {
     for (const auto& [chatId, chat] : state.chats) {
         json value = {
             {"live_dashboard_message_id", chat.liveDashboardMessageId},
-            {"last_alert_text_message_id", chat.lastAlertTextMessageId}
+            {"last_alert_text_message_id", chat.lastAlertTextMessageId},
+            {"photo_panel", chat.photoPanel}
         };
         if (!chat.language.empty()) {
             value["language"] = chat.language;
@@ -1271,6 +1276,8 @@ std::string formatHistoryReport(const std::deque<HealthSnapshot>& history) {
     return codeBlock(oss.str());
 }
 
+#include "monitor_cards.h"
+
 int sendDashboard(const Config& cfg, const std::string& dashboardText, const std::string& replyMarkup = "") {
     ApiResponse response = callApi("sendMessage", {
         {"chat_id", cfg.chatId},
@@ -1400,6 +1407,37 @@ void clearLastAlertTextMessage(
     saveBotStateAtomic(botStatePath, botState);
 }
 
+ApiResponse callPhotoApi(const Config& cfg, const std::string& path, int messageId,
+                         const std::string& keyboard) {
+    ApiResponse response;
+    CURL* curl = curl_easy_init(); if (!curl) return response;
+    curl_mime* mime = curl_mime_init(curl);
+    auto field = [&](const char* name, const std::string& value) {
+        auto* part = curl_mime_addpart(mime); curl_mime_name(part,name);
+        curl_mime_data(part,value.c_str(),CURL_ZERO_TERMINATED);
+    };
+    field("chat_id",cfg.chatId); field("reply_markup",keyboard);
+    if (messageId > 0) {
+        field("message_id",std::to_string(messageId));
+        field("media",json({{"type","photo"},{"media","attach://panel"},{"caption",""}}).dump());
+    }
+    auto* photo = curl_mime_addpart(mime);
+    curl_mime_name(photo,messageId > 0 ? "panel" : "photo");
+    curl_mime_filedata(photo,path.c_str());
+    const std::string url = "https://api.telegram.org/bot"+cfg.token+"/"+(messageId > 0 ? "editMessageMedia" : "sendPhoto");
+    curl_easy_setopt(curl,CURLOPT_URL,url.c_str()); curl_easy_setopt(curl,CURLOPT_MIMEPOST,mime);
+    curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,writeCallback); curl_easy_setopt(curl,CURLOPT_WRITEDATA,&response.body);
+    curl_easy_setopt(curl,CURLOPT_TIMEOUT,15L);
+    const auto rc = curl_easy_perform(curl); curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&response.httpCode);
+    curl_mime_free(mime); curl_easy_cleanup(curl);
+    if (rc == CURLE_OK) {
+        try { response.ok = json::parse(response.body).value("ok",false); } catch (...) {}
+    }
+    if (!response.ok && response.body.find("message is not modified") == std::string::npos)
+        std::cerr << "Photo panel request failed, HTTP " << response.httpCode << ": " << response.body << "\n";
+    return response;
+}
+
 bool showDashboard(
     const Config& cfg,
     BotState& botState,
@@ -1408,15 +1446,41 @@ bool showDashboard(
     int& dashboardMessageId,
     const std::string& text,
     const std::string& replyMarkup,
-    int preferredMessageId = 0
+    int preferredMessageId = 0,
+    bool imagePanel = true
 ) {
     int targetMessageId = preferredMessageId > 0 ? preferredMessageId : dashboardMessageId;
     if (targetMessageId <= 0) {
         targetMessageId = botState.chats[cfg.chatId].liveDashboardMessageId;
     }
 
+    if (imagePanel) {
+        const std::string photo = renderReportCard(text,cfg);
+        if (photo.empty()) { std::cerr << "Panel rendering failed; keeping current screen\n"; return false; }
+        auto response = callPhotoApi(cfg,photo,targetMessageId,replyMarkup);
+        if (response.ok || response.body.find("message is not modified") != std::string::npos) {
+            if (targetMessageId <= 0) {
+                try { targetMessageId = json::parse(response.body).at("result").at("message_id").get<int>(); }
+                catch (...) { return false; }
+            }
+        } else {
+            if (targetMessageId <= 0 || !isStaleDashboardEditError(response)) return false;
+            const int oldId = targetMessageId;
+            response = callPhotoApi(cfg,photo,0,replyMarkup);
+            if (!response.ok) return false;
+            try { targetMessageId = json::parse(response.body).at("result").at("message_id").get<int>(); }
+            catch (...) { return false; }
+            deleteMessage(cfg,oldId);
+        }
+        dashboardMessageId = targetMessageId;
+        botState.chats[cfg.chatId].photoPanel = true;
+        persistLiveDashboardId(botState,cfg,botStatePath,legacyDashboardStatePath,dashboardMessageId);
+        return true;
+    }
+
     if (targetMessageId > 0) {
-        EditDashboardResult editResult = editDashboard(cfg, targetMessageId, text, replyMarkup);
+        EditDashboardResult editResult = botState.chats[cfg.chatId].photoPanel
+            ? EditDashboardResult::StaleMessage : editDashboard(cfg, targetMessageId, text, replyMarkup);
         if (editResult == EditDashboardResult::Updated) {
             dashboardMessageId = targetMessageId;
             persistLiveDashboardId(botState, cfg, botStatePath, legacyDashboardStatePath, dashboardMessageId);
@@ -1437,14 +1501,15 @@ bool showDashboard(
 
         std::cerr << "Saved dashboard message " << targetMessageId
                   << " is stale or has incompatible type; creating a new live screen\n";
-        dashboardMessageId = 0;
-        clearSavedLiveDashboardId(botState, cfg, botStatePath, legacyDashboardStatePath);
+        // Preserve the existing panel until the replacement has been delivered.
     }
 
     int newMessageId = sendDashboard(cfg, text, replyMarkup);
     if (newMessageId <= 0) return false;
 
+    if (targetMessageId > 0 && targetMessageId != newMessageId) deleteMessage(cfg,targetMessageId);
     dashboardMessageId = newMessageId;
+    botState.chats[cfg.chatId].photoPanel = false;
     persistLiveDashboardId(botState, cfg, botStatePath, legacyDashboardStatePath, dashboardMessageId);
     return true;
 }
@@ -1646,11 +1711,13 @@ int main() {
         return 1;
     }
 
-    const std::string botStatePath = "/tmp/systemmonitorbot-bot_state.json";
-    const std::string dashboardStatePath = "/tmp/systemmonitorbot-dashboard-message-id.state";
-    const std::string updatesStatePath = "/tmp/systemmonitorbot-last-update-id.state";
-    const std::string levelsStatePath = "/tmp/systemmonitorbot-levels.state";
-    const std::string historyStatePath = "/tmp/systemmonitorbot-history.state";
+    if (mkdir("data", 0700) != 0 && errno != EEXIST) return 1;
+    if (mkdir("data/state", 0700) != 0 && errno != EEXIST) return 1;
+    const std::string botStatePath = "data/state/systemmonitorbot-bot_state.json";
+    const std::string dashboardStatePath = "data/state/systemmonitorbot-dashboard-message-id.state";
+    const std::string updatesStatePath = "data/state/systemmonitorbot-last-update-id.state";
+    const std::string levelsStatePath = "data/state/systemmonitorbot-levels.state";
+    const std::string historyStatePath = "data/state/systemmonitorbot-history.state";
 
     BotState botState = loadBotState(botStatePath);
     ChatBotState& chatState = botState.chats[cfg.chatId];
@@ -1710,10 +1777,6 @@ int main() {
                         }
 
                         int msgId = cb["message"].value("message_id", 0);
-                        if (msgId > 0) {
-                            dashboardMessageId = msgId;
-                            persistLiveDashboardId(botState, cfg, botStatePath, dashboardStatePath, dashboardMessageId);
-                        }
                         clearLastAlertTextMessage(botState, cfg, botStatePath);
 
                         std::string nextView = viewForCallback(data);
@@ -1732,8 +1795,9 @@ int main() {
                             replyMarkup = keyboardForView(nextView, cfg);
                         }
 
-                        if (showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, response, replyMarkup, msgId)) {
+                        if (showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, response, replyMarkup, 0, nextView.rfind("services",0) != 0)) {
                             currentView = nextView;
+                            if (msgId > 0 && msgId != dashboardMessageId) deleteMessage(cfg, msgId);
                         }
                         continue;
                     }
@@ -1748,15 +1812,21 @@ int main() {
                         std::string nextView = viewForTextCommand(commandText);
                         std::string replyMarkup = keyboardForTextCommand(commandText, cfg);
                         clearLastAlertTextMessage(botState, cfg, botStatePath);
-                        if (normalizedTelegramCommand(commandText) == "/start") {
-                            if (dashboardMessageId > 0) {
-                                deleteMessage(cfg, dashboardMessageId);
-                            }
+                        const int previousDashboardId = dashboardMessageId;
+                        const bool freshStart = normalizedTelegramCommand(commandText) == "/start";
+                        if (freshStart) {
+                            // A history-cleared message may still accept edits but remain invisible.
                             clearSavedLiveDashboardId(botState, cfg, botStatePath, dashboardStatePath);
                             dashboardMessageId = 0;
                         }
-                        if (showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, response, replyMarkup)) {
+                        if (showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, response, replyMarkup, 0, nextView.rfind("services",0) != 0)) {
                             currentView = nextView;
+                            if (freshStart && previousDashboardId > 0 && previousDashboardId != dashboardMessageId)
+                                deleteMessage(cfg, previousDashboardId);
+                            deleteMessage(cfg, msg.value("message_id", 0));
+                        } else if (freshStart) {
+                            dashboardMessageId = previousDashboardId;
+                            persistLiveDashboardId(botState, cfg, botStatePath, dashboardStatePath, dashboardMessageId);
                         }
 
                     }
@@ -1802,7 +1872,7 @@ int main() {
                 }
             }
 
-            showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, refreshText, refreshKeyboard);
+            showDashboard(cfg, botState, botStatePath, dashboardStatePath, dashboardMessageId, refreshText, refreshKeyboard, 0, currentView.rfind("services",0) != 0);
             lastRefreshAt = now;
         }
 
